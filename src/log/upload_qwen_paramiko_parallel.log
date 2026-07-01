@@ -1,0 +1,7 @@
+source: C:\Users\jinhenghao\Downloads\Qwen3.6-27B-Q4_K_M.gguf
+size: 16547398784 bytes
+parts: 31, part_size: 536870912, parallel: 6
+computing local sha256...
+sha256: 33625d8dc3a5dd8d88c324d47db58561b11f7072816287078bfe58b4c55782f9
+[progress] 0/16547398784 bytes 0.00% at 0.00 MiB/s
+[progress] 0/16547398784 bytes 0.00% at 0.00 MiB/s
