@@ -1,0 +1,36 @@
+source_column,entity_type,attr_name,data_type,query_keywords_zh,query_keywords_en,is_searchable,description
+id_type,Molecule,id_type,string,标识类型;ID类型;类型,id type,False,Molecule标识符类型（smiles或inchi）
+roles,Molecule,roles,list,角色;roles;功能,roles;function,False,Molecule在反应中的角色列表
+properties,Molecule,properties,dict,属性;properties;化合物属性;分子属性,properties,False,化合物扩展属性（CAS、PubChemID、分子式、分子量）
+CAS,Molecule,CAS,string,CAS号;CAS Number;登记号,CAS number,True,CAS Registry Number
+PubChemID,Molecule,PubChemID,string,PubChem ID;CID;化合物ID,PubChem ID;CID,True,PubChem Compound ID
+molecular_weight,Molecule,molecular_weight,float,分子量;分子质量;molecular weight,molecular weight,True,分子量（g/mol）
+formula,Molecule,formula,string,分子式;chemical formula;formula,formula,True,化学分子式（如C6H12O6）
+reaction_number,Reaction,reaction_number,string,反应编号;编号;number,reaction number,True,反应唯一编号（如RXN001）
+created_at,Reaction,created_at,datetime,创建时间;时间戳;timestamp,created at,False,节点创建时间戳
+name,Reaction,name,string,反应名称;名称;反应名,reaction name,True,反应名称（如Fructose + Glycine）
+name,Ingredient,name,string,食材名称;食材名;原料名,ingredient name;food name,True,食材名称（如牛肉、白菜）
+fooddb_id,Ingredient,fooddb_id,string,FoodDB ID;食材ID;数据库ID,FoodDB ID,True,FoodDB数据库实体ID
+food_category_en,Ingredient,food_category_en,string,英文分类;category;英文类别,category English,True,食材英文分类
+food_category_cn,Ingredient,food_category_cn,string,中文分类;食物分类;类别,category Chinese,True,食材中文分类
+entity_alias_en,Ingredient,entity_alias_en,string,英文别名;英文名称;alias,English alias;English name,True,食材英文别名
+name,Dish,name,string,菜名;菜品名称;菜式,dish name;cuisine name,True,菜品名称（如小炒黄牛肉）
+technique,Dish,technique,string,烹饪技法;技法;做法;工艺,cooking technique;method,True,烹饪技法（如爆炒、白灼）
+cook_id,Dish,cook_id,string,菜谱ID;编号;ID,recipe ID,True,菜谱唯一编号
+preparation,Dish,preparation,text,备菜过程;准备过程;预处理,preparation process,False,备菜步骤详细描述
+cooking_process,Dish,cooking_process,text,烹饪过程;下锅过程;烹制,cooking process,False,烹饪步骤详细描述
+category,Dish,category,string,菜系;类别;分类,cuisine category,True,菜系分类（如川菜、粤菜）
+name,Food_Category,name,string,分类名称;类别名;目录名,category name,True,分类名称（如叶菜类、肉类）
+category_type,Food_Category,category_type,string,分类类型;类型;数据源,category type,False,分类来源（如FoodDB）
+order,Reactant_SMILES,order,int,顺序;序号;位置,order;position;index,False,反应物/产物在反应中的顺序位置（1,2,3...）,1;2;3
+order,Product_SMILES,order,int,顺序;序号;位置,order;position;index,False,产物在反应中的顺序位置,1;2
+order,Reactant_InChI,order,int,顺序;序号;位置,order;position;index,False,反应物InChI的顺序位置,1;2;3
+order,Product_InChI,order,int,顺序;序号;位置,order;position;index,False,产物InChI的顺序位置,1;2
+stage,Molecule,stage,string,阶段;来源阶段;构建阶段,stage;source stage;build stage,False,节点构建阶段标记（stage1/stage3）,stage1;stage3
+updated_at,Molecule,updated_at,datetime,更新时间;修改时间,updated at;modified at,False,节点属性最后更新时间戳,2024-01-15T10:30:00
+source_files,Molecule,source_files,list,来源文件;数据源文件,source files;data sources,False,数据来源文件列表（支持多文件追踪）,"[file1.csv,file2.xlsx]"
+化合物名,Molecule,化合物名,string,化合物名称;中文名;化学名,compound name;chinese name;chemical name,True,化合物中文名称（Stage 3增强属性）,咖啡因;苯甲醛
+气味阈值（mg/kg水）,Molecule,气味阈值（mg/kg水）,float,阈值;气味阈值;嗅觉阈值;odor threshold,odor threshold;threshold value;threshold,True,水中气味阈值（Stage 3增强属性）,0.5;1.2;0.01
+InChI_non_chiral,Molecule,InChI_non_chiral,string,无手性InChI;标准InChI;非手性InChI,non-chiral InChI;standard InChI;achiral InChI,True,无立体化学的InChI标识符（Stage 3新增）,InChI=1S/C8H10N4O2...
+source_file,CONTAINS_MOLECULE,source_file,string,来源文件;数据源,data source;source file,False,关系数据来源文件名（用于追踪）,ingredient_data.csv
+amount,HAS_INGREDIENT,amount,string,用量;数量;amount,amount;quantity;portion,False,食材在菜品中的用量（如'200g','少许'）,200g;适量;少许

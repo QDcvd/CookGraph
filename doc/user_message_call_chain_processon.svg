@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="2050" viewBox="0 0 1600 2050">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#3b2a18"/>
+    </marker>
+    <style>
+      .bg { fill: #fff9ea; }
+      .title { font: 700 34px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #2b2118; }
+      .subtitle { font: 18px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #6b5a42; }
+      .lane-title { font: 700 21px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #3b2a18; }
+      .box-title { font: 700 18px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #2b2118; }
+      .box-text { font: 15px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #544637; }
+      .tiny { font: 13px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #6b5a42; }
+      .lane { fill: #fff3d2; stroke: #d5b978; stroke-width: 2; opacity: .75; }
+      .frontend { fill: #fef0c7; stroke: #b88900; }
+      .backend { fill: #e8f3ff; stroke: #4382b8; }
+      .agent { fill: #f1e8ff; stroke: #7b5fb3; }
+      .tool { fill: #e8f8e8; stroke: #4a9a56; }
+      .return { fill: #ffe8e3; stroke: #ba6a56; }
+      .decision { fill: #fff; stroke: #3b2a18; stroke-width: 2; }
+      .line { fill: none; stroke: #3b2a18; stroke-width: 2.4; marker-end: url(#arrow); }
+      .line-soft { fill: none; stroke: #8d7a61; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow); }
+      .label { font: 700 14px "Microsoft YaHei", "PingFang SC", Arial, sans-serif; fill: #3b2a18; }
+      .note { fill: #fffdf5; stroke: #e0c98f; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="2050"/>
+  <text class="title" x="60" y="70">迷你烹饪问答机器人：用户发消息后的调用链流程图</text>
+  <text class="subtitle" x="60" y="105">从前端输入，到后端 SSE、Agent 工具循环、菜谱图谱/联网搜索，再到最终回答回传。</text>
+
+  <rect class="lane" x="40" y="140" width="292" height="1700" rx="10"/>
+  <rect class="lane" x="354" y="140" width="292" height="1700" rx="10"/>
+  <rect class="lane" x="668" y="140" width="292" height="1700" rx="10"/>
+  <rect class="lane" x="982" y="140" width="292" height="1700" rx="10"/>
+  <rect class="lane" x="1296" y="140" width="264" height="1700" rx="10"/>
+  <text class="lane-title" x="75" y="178">用户 / 前端</text>
+  <text class="lane-title" x="389" y="178">后端 API</text>
+  <text class="lane-title" x="703" y="178">Agent 工具循环</text>
+  <text class="lane-title" x="1017" y="178">工具层</text>
+  <text class="lane-title" x="1331" y="178">SSE / 渲染</text>
+
+  <g id="frontend">
+    <rect class="frontend" x="82" y="230" width="210" height="76" rx="8"/>
+    <text class="box-title" x="105" y="262">用户发送消息</text>
+    <text class="box-text" x="105" y="287">输入菜谱问题或追问</text>
+
+    <rect class="frontend" x="82" y="350" width="210" height="84" rx="8"/>
+    <text class="box-title" x="105" y="382">ChatInput.vue</text>
+    <text class="box-text" x="105" y="407">onSend()</text>
+
+    <rect class="frontend" x="82" y="478" width="210" height="92" rx="8"/>
+    <text class="box-title" x="105" y="510">chat.ts</text>
+    <text class="box-text" x="105" y="535">chatStore.handleSend()</text>
+    <text class="tiny" x="105" y="557">创建 bot 占位消息</text>
+
+    <rect class="frontend" x="82" y="616" width="210" height="88" rx="8"/>
+    <text class="box-title" x="105" y="648">fetch('/chat/stream')</text>
+    <text class="box-text" x="105" y="673">发起 SSE 请求</text>
+  </g>
+
+  <g id="backend">
+    <rect class="backend" x="396" y="616" width="210" height="88" rx="8"/>
+    <text class="box-title" x="419" y="648">Vite 代理</text>
+    <text class="box-text" x="419" y="673">/chat -> localhost:8000</text>
+
+    <rect class="backend" x="396" y="748" width="210" height="92" rx="8"/>
+    <text class="box-title" x="419" y="780">FastAPI</text>
+    <text class="box-text" x="419" y="805">backend.app.chat_stream()</text>
+    <text class="tiny" x="419" y="827">POST /chat/stream</text>
+
+    <rect class="backend" x="396" y="884" width="210" height="88" rx="8"/>
+    <text class="box-title" x="419" y="916">保存用户消息</text>
+    <text class="box-text" x="419" y="941">add_message(..., human)</text>
+
+    <rect class="backend" x="396" y="1016" width="210" height="92" rx="8"/>
+    <text class="box-title" x="419" y="1048">构造上下文</text>
+    <text class="box-text" x="419" y="1073">build_agent_history()</text>
+    <text class="tiny" x="419" y="1095">替代旧的粗暴 history</text>
+
+    <rect class="backend" x="396" y="1152" width="210" height="88" rx="8"/>
+    <text class="box-title" x="419" y="1184">SSE 生成器</text>
+    <text class="box-text" x="419" y="1209">event_generator()</text>
+  </g>
+
+  <g id="agent">
+    <rect class="agent" x="710" y="1152" width="210" height="88" rx="8"/>
+    <text class="box-title" x="733" y="1184">Agent 入口</text>
+    <text class="box-text" x="733" y="1209">stream_search_agent()</text>
+
+    <rect class="agent" x="710" y="1290" width="210" height="98" rx="8"/>
+    <text class="box-title" x="733" y="1322">装载工具上下文</text>
+    <text class="box-text" x="733" y="1347">_build_tool_loop_messages()</text>
+    <text class="tiny" x="733" y="1370">只注册 recipe / web</text>
+
+    <rect class="agent" x="710" y="1438" width="210" height="88" rx="8"/>
+    <text class="box-title" x="733" y="1470">绑定工具模型</text>
+    <text class="box-text" x="733" y="1495">get_tool_bound_model()</text>
+
+    <polygon class="decision" points="815,1578 930,1648 815,1718 700,1648"/>
+    <text class="box-title" x="770" y="1637">模型是否</text>
+    <text class="box-title" x="759" y="1662">调用工具?</text>
+  </g>
+
+  <g id="tools">
+    <rect class="tool" x="1024" y="1260" width="210" height="90" rx="8"/>
+    <text class="box-title" x="1047" y="1292">recipe_query_tool</text>
+    <text class="box-text" x="1047" y="1317">先查本地菜谱图谱</text>
+
+    <rect class="tool" x="1024" y="1394" width="210" height="98" rx="8"/>
+    <text class="box-title" x="1047" y="1426">query_recipe_kg()</text>
+    <text class="box-text" x="1047" y="1451">RecipeQuerySystem.query()</text>
+    <text class="tiny" x="1047" y="1474">解析意图 -> 执行查询</text>
+
+    <polygon class="decision" points="1129,1538 1244,1608 1129,1678 1014,1608"/>
+    <text class="box-title" x="1081" y="1598">图谱是否</text>
+    <text class="box-title" x="1097" y="1623">命中?</text>
+
+    <rect class="tool" x="1024" y="1700" width="210" height="88" rx="8"/>
+    <text class="box-title" x="1047" y="1732">web_search_tool</text>
+    <text class="box-text" x="1047" y="1757">未命中时自动补搜</text>
+
+    <rect class="tool" x="1024" y="1128" width="210" height="88" rx="8"/>
+    <text class="box-title" x="1047" y="1160">记录工具结果</text>
+    <text class="box-text" x="1047" y="1185">_append_tool_result_to_trace()</text>
+  </g>
+
+  <g id="return">
+    <rect class="return" x="1330" y="1128" width="190" height="100" rx="8"/>
+    <text class="box-title" x="1353" y="1160">最终回答整理</text>
+    <text class="box-text" x="1353" y="1185">普通 content-only 模型</text>
+    <text class="tiny" x="1353" y="1208">不再绑定 tools</text>
+
+    <rect class="return" x="1330" y="1272" width="190" height="92" rx="8"/>
+    <text class="box-title" x="1353" y="1304">SSE 输出</text>
+    <text class="box-text" x="1353" y="1329">trace / rag_step / content</text>
+    <text class="tiny" x="1353" y="1351">失败时走兜底摘要</text>
+
+    <rect class="return" x="1330" y="1408" width="190" height="92" rx="8"/>
+    <text class="box-title" x="1353" y="1440">前端解析事件</text>
+    <text class="box-text" x="1353" y="1465">更新回答与检索过程</text>
+
+    <rect class="return" x="1330" y="1544" width="190" height="88" rx="8"/>
+    <text class="box-title" x="1353" y="1576">后端保存回复</text>
+    <text class="box-text" x="1353" y="1601">AI message + rag_trace</text>
+  </g>
+
+  <path class="line" d="M187 306 L187 350"/>
+  <path class="line" d="M187 434 L187 478"/>
+  <path class="line" d="M187 570 L187 616"/>
+  <path class="line" d="M292 660 L396 660"/>
+  <path class="line" d="M501 704 L501 748"/>
+  <path class="line" d="M501 840 L501 884"/>
+  <path class="line" d="M501 972 L501 1016"/>
+  <path class="line" d="M501 1108 L501 1152"/>
+  <path class="line" d="M606 1196 L710 1196"/>
+  <path class="line" d="M815 1240 L815 1290"/>
+  <path class="line" d="M815 1388 L815 1438"/>
+  <path class="line" d="M815 1526 L815 1578"/>
+
+  <path class="line" d="M930 1648 C970 1648 970 1305 1024 1305"/>
+  <text class="label" x="942" y="1628">是</text>
+  <path class="line" d="M1129 1350 L1129 1394"/>
+  <path class="line" d="M1129 1492 L1129 1538"/>
+  <path class="line" d="M1129 1678 L1129 1700"/>
+  <text class="label" x="1140" y="1694">未命中</text>
+  <path class="line" d="M1014 1608 C972 1608 972 1172 1024 1172"/>
+  <text class="label" x="980" y="1586">命中</text>
+  <path class="line" d="M1129 1700 C1129 1660 1280 1660 1280 1178 C1280 1150 1300 1178 1330 1178"/>
+  <path class="line" d="M1234 1172 L1330 1178"/>
+
+  <path class="line" d="M700 1648 C650 1648 650 1318 1330 1318"/>
+  <text class="label" x="664" y="1628">否，直接回答</text>
+  <path class="line" d="M1425 1228 L1425 1272"/>
+  <path class="line" d="M1425 1364 L1425 1408"/>
+  <path class="line" d="M1425 1500 L1425 1544"/>
+
+  <path class="line-soft" d="M1330 1318 C1265 1318 1265 1140 1234 1140"/>
+  <text class="tiny" x="1190" y="1126">同时返回 trace 给前端展示参考文献</text>
+
+  <rect class="note" x="60" y="1880" width="850" height="92" rx="8"/>
+  <text class="box-title" x="88" y="1912">当前工具策略</text>
+  <text class="box-text" x="88" y="1940">1. 菜谱类问题优先调用 recipe_query_tool，避免一上来就联网。</text>
+  <text class="box-text" x="88" y="1964">2. 本地图谱未命中时，自动补一次 web_search_tool，并用工具结果整理最终回答。</text>
+
+  <rect class="note" x="948" y="1880" width="560" height="92" rx="8"/>
+  <text class="box-title" x="976" y="1912">已暂停注册的工具</text>
+  <text class="box-text" x="976" y="1940">find_tool / read_file_tool 仍保留代码，但当前不注入工具列表，</text>
+  <text class="box-text" x="976" y="1964">避免模型把自然语言问题误当成本地文件路径。</text>
+</svg>

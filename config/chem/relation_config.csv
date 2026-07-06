@@ -1,0 +1,14 @@
+relation_type,source_entity,target_entity,edge_properties,query_keywords_forward,query_keywords_reverse,description,stage
+HAS_MOLECULE,Reaction,Molecule,"role, order, id_type, created_at",包含分子;有分子;has molecule;contains,属于反应;在反应中;is in reaction,【V2核心】反应关联统一Molecule实体，标记角色（反应物/产物）和序号,Stage1
+CONTAINS_MOLECULE,Ingredient,Molecule,source_file,包含分子;has molecule;contains molecule,存在于食材;found in ingredient,【Stage 3预留】食材包含的分子（跨域关联）,Stage3
+FOUND_IN_INGREDIENT,Molecule,Ingredient,-,存在于;found in;in ingredient,包含该分子;contains,【Stage 3预留】分子存在于哪些食材（反向查询）,Stage3
+HAS_PROPERTY,Molecule,-,(properties字典),具有属性;has property;property of,-,化合物属性存储为Molecule节点属性（如CAS、PubChemID）,Stage3
+has_catalog_1,Reaction,Catalog_1,-,属于一级分类;has catalog 1;category 1,belongs to catalog 1;in category 1,反应属于一级分类目录,Stage1
+has_catalog_2,Reaction,Catalog_2,-,属于二级分类;has catalog 2;category 2,belongs to catalog 2;in category 2,反应属于二级分类目录,Stage1
+AA_sugars_name,Reaction,AA_Sugar,-,标记为;is;aa-sugar标记;amino acid-sugar,标记反应;marked as,反应关联氨基酸-糖组合标记,Stage1
+has_Reactant_SMILE,Reaction,Reactant_SMILES,order,有反应物SMILES;has reactant;反应物为;reactant is,是反应物;as reactant;belongs to reaction,反应关联反应物SMILES角色节点（带序号）,Stage1
+has_Product_SMILE,Reaction,Product_SMILES,order,有产物SMILES;has product;产物为;product is,是产物;as product;belongs to reaction,反应关联产物SMILES角色节点（带序号）,Stage1
+has_Reactant_InChI,Reaction,Reactant_InChI,order,有反应物InChI;反应物InChI;reactant inchi,是反应物InChI;as reactant InChI,反应关联反应物InChI角色节点（带序号）,Stage1
+has_Product_InChI,Reaction,Product_InChI,order,有产物InChI;产物InChI;product inchi,是产物InChI;as product InChI,反应关联产物InChI角色节点（带序号）,Stage1
+has_reaction_SMILE,Reaction,Reaction_SMILES,-,有反应SMILES;反应式为;equation is,是反应式;is equation,【脚本扩展】反应整体SMILES关系,Stage1
+has_rxn_InChI,Reaction,Reaction_InChI,-,有反应InChI;反应标准式为,是反应标准式;is equation InChI,【脚本扩展】反应整体InChI关系,Stage1

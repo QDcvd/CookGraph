@@ -1,0 +1,312 @@
+"""MiniCookingAgent-Demo 的工具调用解析、执行与 trace 记录。
+
+本模块依赖 agent_tools 获取真实工具注册表和路径提取辅助函数。
+禁止导入 agent_adapter_local_LLM_harness。
+"""
+
+import asyncio
+import ast
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+from backend.agent_tools import _extract_paths_from_tool_text, _get_tools
+
+
+# ---------------------------------------------------------------------------
+# _execute_tool_call 内部使用的辅助函数（避免从 harness 循环导入）
+# ---------------------------------------------------------------------------
+
+def _message_content_to_text(content: Any) -> str:
+    """将 langchain 消息内容标准化为纯文本。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text = ""
+        for block in content:
+            if isinstance(block, str):
+                text += block
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text += block.get("text", "")
+        return text
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# 工具调用名称 / 参数提取
+# ---------------------------------------------------------------------------
+
+def _tool_call_name(call: Any) -> str:
+    """从工具调用中提取工具名称。"""
+    if isinstance(call, dict):
+        return call.get("name") or call.get("function", {}).get("name") or "tool"
+    return getattr(call, "name", "tool")
+
+
+def _tool_call_args(call: Any) -> dict:
+    """从工具调用中提取参数字典。"""
+    if isinstance(call, dict):
+        args = call.get("args") or call.get("arguments") or {}
+        return args if isinstance(args, dict) else {"raw": str(args)}
+    args = getattr(call, "args", {})
+    return args if isinstance(args, dict) else {"raw": str(args)}
+
+
+def _tool_call_id(call: Any, fallback: str) -> str:
+    """从工具调用中提取 ID，缺失时使用 fallback。"""
+    if isinstance(call, dict):
+        return str(call.get("id") or fallback)
+    return str(getattr(call, "id", "") or fallback)
+
+
+# ---------------------------------------------------------------------------
+# 工具参数名解析
+# ---------------------------------------------------------------------------
+
+def _tool_arg_names(tool_name: str) -> list[str]:
+    """根据工具的实际 args schema 返回参数名列表。"""
+    tool_by_name = {getattr(item, "name", getattr(item, "__name__", "")): item for item in _get_tools()}
+    selected = tool_by_name.get(tool_name)
+    args = getattr(selected, "args", None)
+    if isinstance(args, dict) and args:
+        return list(args.keys())
+    return {
+        "find_tool": ["path", "pattern"],
+        "read_file_tool": ["path"],
+        "web_search_tool": ["query"],
+    }.get(tool_name, [])
+
+
+# ---------------------------------------------------------------------------
+# 文本式工具调用解析（兼容小模型把工具调用写成普通文本的场景）
+# ---------------------------------------------------------------------------
+
+def _literal_ast_value(node: ast.AST) -> Any:
+    """安全地计算 AST 字面量节点。"""
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        return None
+
+
+def _parse_textual_tool_args(tool_name: str, args_text: str) -> dict:
+    """将文本形式的参数解析为参数字典。
+
+    支持 JSON 格式、ast 可解析的函数调用格式，以及纯字符串兜底。
+    """
+    text = args_text.strip()
+    if not text:
+        return {}
+
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    try:
+        parsed = ast.parse(f"_tool({text})", mode="eval")
+    except SyntaxError:
+        key = _tool_arg_names(tool_name)[:1] or ["query"]
+        return {key[0]: text.strip().strip("'\"")}
+
+    if not isinstance(parsed.body, ast.Call):
+        return {}
+
+    arg_names = _tool_arg_names(tool_name)
+    args: dict[str, Any] = {}
+    for index, node in enumerate(parsed.body.args):
+        if index >= len(arg_names):
+            break
+        value = _literal_ast_value(node)
+        if value is not None:
+            args[arg_names[index]] = value
+
+    for keyword in parsed.body.keywords:
+        if keyword.arg:
+            value = _literal_ast_value(keyword.value)
+            if value is not None:
+                args[keyword.arg] = value
+
+    return args
+
+
+def _parse_textual_tool_call(raw_text: str) -> dict | None:
+    """将文本式工具调用（如 web_search_tool("...")）转换为真实工具调用。
+
+    部分本地 OpenAI 兼容后端暴露了工具 schema，但模型仍然输出函数调用文本，
+    此函数将文本视为调用工具的意图。
+    """
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    # 去除可能的 Markdown 代码块围栏
+    fenced = re.search(r"```(?:python|json|text)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    available = [getattr(item, "name", getattr(item, "__name__", "")) for item in _get_tools()]
+    tool_pattern = "|".join(re.escape(name) for name in available if name)
+    if not tool_pattern:
+        return None
+
+    # 尝试 JSON 格式的调用声明
+    jsonish = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if jsonish:
+        try:
+            data = json.loads(jsonish.group(0))
+            name = data.get("name") or data.get("tool_name")
+            args = data.get("args") or data.get("arguments") or {}
+            if name in available and isinstance(args, dict):
+                return {"name": name, "args": args}
+        except Exception:
+            pass
+
+    # 尝试 工具名(参数) 格式
+    call_match = re.search(
+        rf"(?P<name>{tool_pattern})\s*\((?P<args>.*?)\)\s*$",
+        text,
+        flags=re.DOTALL,
+    )
+    if not call_match:
+        call_match = re.search(
+            rf"(?P<name>{tool_pattern})\s*\((?P<args>.*?)\)",
+            text,
+            flags=re.DOTALL,
+        )
+    if call_match:
+        name = call_match.group("name")
+        args = _parse_textual_tool_args(name, call_match.group("args"))
+        return {"name": name, "args": args}
+
+    # 尝试 ReAct 风格 Action/Action Input 格式
+    action_match = re.search(
+        rf"(?:Action|工具)\s*[:：]\s*(?P<name>{tool_pattern}).*?(?:Action Input|参数|输入)\s*[:：]\s*(?P<args>.+)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if action_match:
+        name = action_match.group("name")
+        args_text = action_match.group("args").strip()
+        args = _parse_textual_tool_args(name, args_text)
+        return {"name": name, "args": args}
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 通用工具路由器的响应解析
+# ---------------------------------------------------------------------------
+
+def _parse_missing_tool_router_response(raw_text: str) -> dict | None:
+    """解析通用工具路由器返回的 JSON，提取工具名和参数。"""
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    else:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if match:
+            text = match.group(0)
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    tool_name = data.get("tool_name")
+    if tool_name is None or str(tool_name).strip().lower() in {"", "null", "none", "no_tool"}:
+        return None
+
+    available = {getattr(item, "name", getattr(item, "__name__", "")) for item in _get_tools()}
+    tool_name = str(tool_name).strip()
+    if tool_name not in available:
+        return None
+
+    args = data.get("args")
+    if not isinstance(args, dict):
+        args = {}
+    return {"name": tool_name, "args": args}
+
+
+# ---------------------------------------------------------------------------
+# Trace 记录
+# ---------------------------------------------------------------------------
+
+def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, content: str) -> None:
+    """将工具执行结果记录到 trace 中。"""
+    trace["tool_used"] = True
+    trace["tool_name"] = tool_name
+    trace["tool_calls"].append(
+        {
+            "tool_name": tool_name,
+            "args": args,
+            "output_preview": content[:800],
+        }
+    )
+
+    if tool_name == "find_tool":
+        path = str(args.get("path", "."))
+        pattern = str(args.get("pattern", "*"))
+        trace["searched_paths"].append({"path": path, "pattern": pattern})
+        for matched_path in _extract_paths_from_tool_text(content):
+            if matched_path not in trace["matched_files"]:
+                trace["matched_files"].append(matched_path)
+                trace["retrieved_chunks"].append(
+                    {
+                        "filename": matched_path,
+                        "text": "通过本地文件搜索匹配。",
+                    }
+                )
+    elif tool_name == "read_file_tool":
+        filename = str(args.get("path", ""))
+        trace["read_files"].append(filename)
+        trace["retrieved_chunks"].append(
+            {
+                "filename": filename,
+                "text": content[:1000],
+            }
+        )
+    elif tool_name == "web_search_tool":
+        trace["retrieved_chunks"].append(
+            {
+                "filename": "web_search_tool",
+                "text": content[:1000],
+            }
+        )
+    elif tool_name == "recipe_query_tool":
+        trace["retrieved_chunks"].append(
+            {
+                "filename": "recipe_query_tool",
+                "text": content[:1000],
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# 工具执行
+# ---------------------------------------------------------------------------
+
+async def _execute_tool_call(call: Any) -> tuple[str, dict, str]:
+    """执行一次工具调用，返回（工具名、参数、结果文本）。"""
+    tool_name = _tool_call_name(call)
+    args = _tool_call_args(call)
+    tool_by_name = {getattr(item, "name", getattr(item, "__name__", "")): item for item in _get_tools()}
+    selected = tool_by_name.get(tool_name)
+    if selected is None:
+        return tool_name, args, f"工具不存在：{tool_name}"
+
+    try:
+        result = await asyncio.to_thread(selected.invoke, args)
+        return tool_name, args, _message_content_to_text(result) if not isinstance(result, str) else result
+    except Exception as e:
+        return tool_name, args, f"工具执行失败：{e}"

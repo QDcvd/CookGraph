@@ -1,0 +1,14 @@
+relation_type,source_entity,target_entity,edge_properties,query_keywords_forward,query_keywords_reverse,description,stage
+HAS_MOLECULE,Reaction,Molecule,"role,order,id_type,created_at",包含分子;has molecule,属于反应;is in reaction,【V2核心】反应关联统一Molecule实体,Stage1
+has_catalog_1,Reaction,Catalog_1,-,属于一级分类;has catalog 1,包含反应;contains reaction,反应属于一级分类目录,Stage1
+has_catalog_2,Reaction,Catalog_2,-,属于二级分类;has catalog 2,包含反应;contains reaction,反应属于二级分类目录,Stage1
+AA_sugars_name,Reaction,AA_Sugar,-,标记为;is;aa-sugar标记,标记反应;marked as,反应关联氨基酸-糖组合标记,Stage1
+has_Reactant_SMILE,Reaction,Reactant_SMILES,order,有反应物SMILES;has reactant,是反应物;as reactant,反应关联反应物SMILES角色,Stage1
+has_Product_SMILE,Reaction,Product_SMILES,order,有产物SMILES;has product,是产物;as product,反应关联产物SMILES角色,Stage1
+CONTAINS_MOLECULE,Ingredient,Molecule,source_file,包含分子;has molecule;contains;有哪些化学物质,存在于食材;found in ingredient;在哪些食材中,【Stage 3核心】食材包含的分子（跨域关联）,Stage3
+FOUND_IN_INGREDIENT,Molecule,Ingredient,-,存在于;found in;在哪些食材中,包含该分子;contains;食材中有哪些,【Stage 3核心】分子存在于哪些食材（反向查询）,Stage3
+HAS_INGREDIENT,Dish,Ingredient,"source,amount",使用食材;has ingredient;包含食材;用了什么,用于菜品;used in dish;做哪些菜,菜品使用的食材,Stage3
+USED_IN_DISH,Ingredient,Dish,-,用于菜品;used in;可以做哪些菜,使用食材;uses ingredient,食材被用于哪些菜品（反向）,Stage3
+HAS_FOOD_CATEGORY,Ingredient,Food_Category,"category_type,source_file",属于分类;has category;是什么类别,包含食材;contains ingredient,食材所属分类,Stage3
+CONTAINS_INGREDIENT,Food_Category,Ingredient,-,包含食材;contains;有哪些食材,属于分类;belongs to,分类包含哪些食材（反向）,Stage3
+HAS_PROPERTY,Molecule,-,(properties字典),具有属性;has property;CAS号;PubChemID,-,化合物属性（CAS、PubChemID、分子量等）,Stage3

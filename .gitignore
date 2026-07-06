@@ -1,0 +1,55 @@
+# ── 环境配置 ──
+.env
+.env.local
+*.env.local
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# ── 模型文件（大文件，需要单独下载） ──
+models/
+
+# ── 前端 ──
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── 缓存 ──
+backend/.cache/
+
+# ── 测试输出 ──
+test/test_results.json
+test/test_report.md
+test/__pycache__/
+
+# ── Claude Code 配置（含本地绝对路径） ──
+.claude/settings.json
+
+# ── IDE / 系统 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~.tmp
+
+# ── Puppeteer ──
+puppeteer-config.json
+
+# ── Mermaid 渲染临时文件 ──
+doc/call_chain_mermaid/
+doc/call_chain_mermaid_svg/
+doc/mmdc-puppeteer-config.json
+
+# ── Office 临时文件 ──
+~$*
+
+# ── 日志 ──
+*.log
+backend-error.log

@@ -1,0 +1,220 @@
+{
+  "algorithm_settings": {
+    "path_search": {
+      "bfs": {
+        "max_level": {
+          "default": 10,
+          "description": "BFS最大搜索深度（步数）",
+          "range": [1, 20],
+          "warning_at": 15
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "单次查询超时时间（防止无限搜索）"
+        },
+        "batch_size": {
+          "default": 5,
+          "description": "批量处理大小"
+        },
+        "ignore_substances": {
+          "default": ["O", "InChI=1S/H2O/h1H2", "H2O", "水"],
+          "description": "路径搜索中忽略的物质（如水分子）"
+        },
+        "cycle_detection": {
+          "enabled": true,
+          "method": "visited_states",
+          "description": "使用visited_states集合防止循环路径"
+        },
+        "description": "BFS路径搜索用于从产物逆向回溯到反应物，支持多步路径发现（核心算法）"
+      },
+      "simple": {
+        "max_steps": {
+          "default": 3,
+          "description": "分步查询最大步数（1-3步）",
+          "available_steps": [1, 2, 3]
+        },
+        "step_definitions": {
+          "1": "直接反应（产物和反应物在同一反应中）",
+          "2": "两步路径（产物←中间体←反应物，两个反应串联）",
+          "3": "三步路径（产物←中间体1←中间体2←反应物，三个反应串联）"
+        },
+        "description": "简化版精确路径查询，分别查找1步、2步、3步路径"
+      }
+    },
+    "fuzzy_match": {
+      "enabled": true,
+      "threshold": 0.6,
+      "methods_priority": ["exact", "normalized", "substring", "sequence_matcher"],
+      "method_details": {
+        "exact": "精确匹配（大小写不敏感）",
+        "normalized": "标准化匹配（去除所有空格后比较）",
+        "substring": "子串匹配（部分匹配）",
+        "sequence_matcher": "SequenceMatcher相似度算法（difflib）"
+      },
+      "description": "模糊匹配策略优先级：精确→标准化→子串→相似度"
+    },
+    "tandem_universal": {
+      "auto_detection": {
+        "enabled": true,
+        "description": "自动检测输入类型（SMILES或InChI）",
+        "smiles": {
+          "pattern": "^[A-Za-z0-9@.\\-+\\=\\(\\)\\[\\]\\{\\}\\#\\\\\\/:]+$",
+          "min_length": 2,
+          "max_length": 500,
+          "forbidden_substrings": ["InChI=", "inchi="]
+        },
+        "inchi": {
+          "required_prefix": "InChI=",
+          "min_length": 10,
+          "max_length": 500,
+          "pattern": "^InChI=1S?/"
+        }
+      },
+      "search_strategy": ["bfs_first", "simple_fallback"],
+      "max_results": 100,
+      "description": "串联反应智能查找：自动识别输入格式，优先BFS，失败后回退到简化版"
+    }
+  },
+  
+  "input_validation": {
+    "security_rules": {
+      "max_length": 500,
+      "forbidden_values": ["nan", "null", "none", "", "undefined", "None"],
+      "sql_injection_check": true,
+      "special_char_filter": "禁止SQL注入特殊字符（;--/*等）"
+    },
+    "smiles_validation": {
+      "allowed_chars": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@+-=()[]{}#./\\:",
+      "max_length": 500,
+      "min_length": 2,
+      "description": "SMILES字符串基本字符验证（仅允许SMILES规范字符）"
+    },
+    "inchi_validation": {
+      "required_prefix": "InChI=",
+      "max_length": 500,
+      "min_length": 10,
+      "description": "InChI必须以'InChI='开头，遵循IUPAC标准格式"
+    }
+  },
+  
+  "output_templates": {
+    "path_result": {
+      "required_fields": [
+        "final_reaction_name",
+        "level",
+        "full_path",
+        "reaction_path",
+        "is_target_path",
+        "path_type"
+      ],
+      "optional_fields": [
+        "product_smiles",
+        "reactant_smiles",
+        "product_inchi",
+        "reactant_inchi",
+        "similarity_score"
+      ],
+      "format_version": "2.0",
+      "example": {
+        "final_reaction_name": "Glucose dehydration",
+        "level": 2,
+        "full_path": ["C6H12O6", "C6H10O5", "C5H4O2"],
+        "reaction_path": ["Step1-RXN", "Step2-RXN"],
+        "is_target_path": true,
+        "path_type": "smiles_bfs_path"
+      }
+    },
+    "reaction_detail": {
+      "required_fields": ["name"],
+      "optional_fields": [
+        "reactants_smiles",
+        "products_smiles",
+        "reactants_inchi",
+        "products_inchi",
+        "reaction_number",
+        "catalog_1",
+        "catalog_2",
+        "aa_sugar"
+      ],
+      "format_version": "1.0"
+    },
+    "substance_search_result": {
+      "required_fields": ["reaction_name", "role", "substance"],
+      "optional_fields": ["reaction_detail", "amount"],
+      "format_version": "1.0"
+    }
+  },
+  
+  "query_patterns": {
+    "path_query": {
+      "natural_language_zh": [
+        "从{start}到{end}的路径",
+        "{start}如何转化为{end}",
+        "{start}到{end}需要几步",
+        "{start}生成{end}的反应路径",
+        "查找{start}到{end}的反应链"
+      ],
+      "natural_language_en": [
+        "path from {start} to {end}",
+        "how to convert {start} to {end}",
+        "reaction path {start} -> {end}",
+        "find pathway from {start} to {end}",
+        "steps from {start} to {end}"
+      ],
+      "structured": {
+        "smiles_format": "SMILES:{from_smiles} -> {to_smiles}",
+        "inchi_format": "InChI:{from_inchi} -> {to_inchi}",
+        "mixed_format": "From:SMILES:{smiles} To:InChI:{inchi}"
+      }
+    },
+    "substance_query": {
+      "patterns_zh": [
+        "{substance}参与了哪些反应",
+        "包含{substance}的反应有哪些",
+        "{substance}作为反应物的反应",
+        "{substance}作为产物的反应"
+      ],
+      "patterns_en": [
+        "reactions containing {substance}",
+        "reactions with {substance}",
+        "{substance} as reactant",
+        "{substance} as product"
+      ],
+      "role_options": ["reactant", "product", "both"],
+      "default_role": "both"
+    }
+  },
+  
+  "performance_optimization": {
+    "caching": {
+      "node_lookup_cache": {
+        "enabled": true,
+        "size": 1000,
+        "ttl": 300,
+        "description": "节点查找结果缓存（5分钟）"
+      },
+      "path_result_cache": {
+        "enabled": false,
+        "description": "路径搜索结果缓存（默认关闭，因路径搜索计算量大且结果多变）"
+      }
+    },
+    "indexing": {
+      "name_to_nodes": true,
+      "label_to_nodes": true,
+      "molecule_to_reactions": {
+        "enabled": true,
+        "description": "分子到反应的反向索引（关键：加速路径搜索）"
+      },
+      "reaction_to_molecules": {
+        "enabled": true,
+        "description": "反应到分子的详细映射（关键：加速反应详情查询）"
+      }
+    },
+    "logging": {
+      "level": "INFO",
+      "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+      "log_search_steps": true,
+      "description": "记录搜索步骤数、队列大小等调试信息"
+    }
+  }
+}

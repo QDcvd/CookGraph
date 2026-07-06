@@ -1,0 +1,56 @@
+{
+  "query_patterns": {
+    "forward_attribute": [
+      "{dish}的{attr}是什么",
+      "{dish}的{attr}",
+      "{dish} {attr}",
+      "查询{dish}的{attr}",
+      "{dish} {attr} 查询"
+    ],
+    "forward_relation": [
+      "{dish}的{rel}有哪些",
+      "{dish}用了什么{rel}",
+      "{dish}的{rel}是什么",
+      "{dish}包含哪些{rel}"
+    ],
+    "reverse": [
+      "{rel}{value}的菜品有哪些",
+      "哪些菜{rel}{value}",
+      "{value}的{dish}有哪些",
+      "使用{value}的{dish}",
+      "{value}的菜式"
+    ]
+  },
+  "entity_aliases": {
+    "Dish": ["菜", "菜品", "菜肴", "菜名", "recipe", "dish", "cook_name"],
+    "Technique": ["技法", "烹饪技法", "做法", "炒法", "烧法", "手法", "tech"],
+    "Taste": ["味道", "口味", "风味", "口感", "taste", "flavor"],
+    "Cuisine": ["菜系", "帮菜", "流派", "地方菜", "cuisine", "style"],
+    "Ingredient": ["食材", "材料", "原料", "主料", "配料", "ingredient"],
+    "Seasoning": ["调味品", "调料", "调味料", "佐料", "seasoning", "spice"],
+    "MealTime": ["用餐时间", "时间", "适宜时间", "meal_time", "time"],
+    "CookingMethod": ["烹饪方法", "方法", "烹饪法", "method", "cooking_method"]
+  },
+  "attribute_aliases": {
+    "prep_process": ["备菜过程", "prep", "preparation", "准备工作", "预处理", "怎么准备", "准备"],
+    "cooking_process": ["下锅过程", "cooking", "下锅", "制作", "烹饪过程", "怎么做", "做法", "步骤"],
+    "cooking_tips": ["烹饪小提示", "tips", "提示", "小提示", "贴士", "技巧", "注意事项", "注意"],
+    "cooking_method_desc": ["烹饪方法", "method", "烹饪法", "方法", "方式"],
+    "fire_control_process": ["火力调节过程", "火力调节", "火力控制", "火候控制", "火力", "火候", "温度控制", "火力档位", "怎么控制火候", "怎么调节火力"],
+    "cook_id": ["编号", "ID", "cook_id", "id"]
+  },
+  "relation_aliases": {
+    "USES_TECHNIQUE": ["技法", "technique", "烹饪技法", "做法"],
+    "HAS_TASTE": ["味道", "taste", "口味"],
+    "BELONGS_TO_CUISINE": ["菜系", "cuisine", "所属菜系"],
+    "USES_MAIN_INGREDIENT": ["主要食材", "主料", "食材", "main"],
+    "USES_AUXILIARY": ["配料", "辅料", "auxiliary"],
+    "USES_SEASONING": ["调味品", "调料", "seasoning"],
+    "SUITABLE_FOR": ["用餐时间", "适宜时间", "meal_time"],
+    "USES_METHOD": ["烹饪方法", "method"]
+  },
+  "reverse_keywords": [
+    "哪些", "什么", "有哪些", "有什么", "list", "show", "查询",
+    "包含", "含有", "使用", "采用", "用了"
+  ]
+}

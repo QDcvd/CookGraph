@@ -1,0 +1,171 @@
+{
+  "algorithm_settings": {
+    "path_search": {
+      "bfs": {
+        "max_level": {
+          "default": 10,
+          "description": "BFS最大搜索深度（步数）",
+          "range": [1, 20],
+          "warning_at": 15
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "description": "单次查询超时时间"
+        },
+        "batch_size": {
+          "default": 5,
+          "description": "批量处理大小"
+        },
+        "ignore_substances": {
+          "default": ["O", "InChI=1S/H2O/h1H2", "H2O", "水"],
+          "description": "路径搜索中忽略的物质"
+        },
+        "cycle_detection": {
+          "enabled": true,
+          "method": "visited_states",
+          "description": "使用visited_states集合防止循环路径"
+        },
+        "description": "BFS路径搜索用于从产物逆向回溯到反应物，支持多步路径发现"
+      },
+      "simple": {
+        "max_steps": {
+          "default": 3,
+          "description": "分步查询最大步数",
+          "available_steps": [1, 2, 3]
+        },
+        "step_definitions": {
+          "1": "直接反应（产物和反应物在同一反应中）",
+          "2": "两步路径（产物←中间体←反应物）",
+          "3": "三步路径（产物←中间体1←中间体2←反应物）"
+        },
+        "description": "简化版精确路径查询"
+      },
+      "cross_domain": {
+        "enabled": true,
+        "max_hops": 5,
+        "path_types": {
+          "dish_to_molecule": {
+            "path": ["Dish", "HAS_INGREDIENT", "Ingredient", "CONTAINS_MOLECULE", "Molecule"],
+            "description": "菜品→食材→分子路径",
+            "max_results": 100
+          },
+          "molecule_to_dish": {
+            "path": ["Molecule", "FOUND_IN_INGREDIENT", "Ingredient", "USED_IN_DISH", "Dish"],
+            "description": "分子→食材→菜品路径（反向）",
+            "max_results": 50
+          },
+          "category_to_molecule": {
+            "path": ["Food_Category", "CONTAINS_INGREDIENT", "Ingredient", "CONTAINS_MOLECULE", "Molecule"],
+            "description": "分类→食材→分子路径",
+            "max_results": 100
+          }
+        },
+        "description": "【新增】跨域路径搜索，支持菜谱与化学实体间的关系发现"
+      }
+    },
+    "fuzzy_match": {
+      "enabled": true,
+      "threshold": 0.6,
+      "methods_priority": ["exact", "normalized", "substring", "pinyin", "sequence_matcher"],
+      "method_details": {
+        "exact": "精确匹配（大小写不敏感）",
+        "normalized": "标准化匹配（去除所有空格后比较）",
+        "substring": "子串匹配（部分匹配）",
+        "pinyin": "【新增】拼音匹配（支持中文菜名拼音首字母）",
+        "sequence_matcher": "SequenceMatcher相似度算法"
+      },
+      "chinese_specific": {
+        "jieba_segmentation": true,
+        "traditional_simplified": true,
+        "description": "中文特定优化：分词匹配、繁简转换"
+      },
+      "description": "模糊匹配策略优先级：精确→标准化→子串→拼音→相似度"
+    },
+    "property_query": {
+      "enabled": true,
+      "supported_properties": ["CAS", "PubChemID", "molecular_weight", "formula", "technique"],
+      "operators": ["=", "contains", ">", "<", "range"],
+      "description": "【Stage 3新增】属性查询支持（如CAS=123-45-6，technique=爆炒）"
+    }
+  },
+  "input_validation": {
+    "security_rules": {
+      "max_length": 500,
+      "forbidden_values": ["nan", "null", "none", "", "undefined", "None"],
+      "sql_injection_check": true
+    },
+    "type_detection": {
+      "smiles": {
+        "pattern": "^[A-Za-z0-9@.\\-+\\=\\(\\)\\[\\]\\{\\}\\#\\\\\\/:]+$",
+        "min_length": 2
+      },
+      "inchi": {
+        "required_prefix": "InChI=",
+        "min_length": 10
+      },
+      "chinese_text": {
+        "pattern": "[\\u4e00-\\u9fa5]",
+        "description": "【新增】检测中文字符（菜名、食材名）"
+      }
+    }
+  },
+  "query_patterns": {
+    "chemical_path": {
+      "natural_language_zh": [
+        "从{start}到{end}的路径",
+        "{start}如何转化为{end}",
+        "{start}到{end}需要几步"
+      ],
+      "structured": {
+        "smiles_format": "SMILES:{from_smiles} -> {to_smiles}",
+        "inchi_format": "InChI:{from_inchi} -> {to_inchi}"
+      }
+    },
+    "cross_domain": {
+      "dish_to_molecule_zh": [
+        "{dish}包含哪些分子",
+        "{dish}有哪些化学物质",
+        "{dish}的化学成分"
+      ],
+      "ingredient_to_molecule_zh": [
+        "{ingredient}有哪些化学物质",
+        "{ingredient}包含什么分子",
+        "{ingredient}的化学成分"
+      ],
+      "molecule_to_food_zh": [
+        "含有{substance}的食材有哪些",
+        "{substance}存在于哪些食物中",
+        "哪些菜含有{substance}"
+      ],
+      "property_query_zh": [
+        "CAS为{cas}的化合物",
+        "PubChemID是{cid}的分子",
+        "分子量大于{mw}的化合物",
+        "使用{technique}技法的菜品"
+      ]
+    }
+  },
+  "performance": {
+    "caching": {
+      "node_lookup_cache": {
+        "enabled": true,
+        "size": 1000,
+        "ttl": 300
+      },
+      "path_result_cache": {
+        "enabled": false
+      }
+    },
+    "indexing": {
+      "name_to_nodes": true,
+      "molecule_to_ingredients": {
+        "enabled": true,
+        "description": "【关键】分子到食材的反向索引，加速跨域查询"
+      },
+      "ingredient_to_dishes": {
+        "enabled": true,
+        "description": "食材到菜品的反向索引"
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+source_column,entity_type,attr_name,data_type,query_keywords_zh,query_keywords_en,is_searchable,description
+cook_id,Dish,cook_id,string,ID;编号;cook_id,identifier,false,菜品唯一标识
+cooking_tips烹饪小提示,Dish,cooking_tips,text,烹饪小提示;tips;提示;贴士;技巧;注意事项,tips;notes;hints,true,烹饪技巧提示
+备菜过程,Dish,prep_process,text,备菜过程;prep;preparation;准备工作;预处理;怎么准备,preparation;prep process,true,食材预处理步骤
+下锅过程,Dish,cooking_process,text,下锅过程;cooking;下锅;烹饪过程;制作过程;怎么做;做法,cooking process;method;steps,true,烹饪制作步骤
+cooking_method烹饪方法,Dish,cooking_method_desc,text,烹饪方法;method;方法描述,cooking method description,true,烹饪方法详细说明
+火力调节过程,Dish,fire_control_process,text,火力调节过程;火力调节;火力控制;火候控制;火力;火候;温度控制;火力档位,fire control process;heat control;temperature control,true,菜品火力调节过程详细说明

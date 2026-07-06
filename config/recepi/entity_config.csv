@@ -1,0 +1,9 @@
+entity_type,node_label,stage,query_keywords_zh,query_keywords_en,description,example
+Dish,Dish,Stage2,菜名;菜品;菜肴;dish;recipe;cook_name,菜名;菜品;菜肴;dish;recipe;cook_name,菜谱主体节点，存储菜品基本信息,小炒黄牛肉
+Technique,Technique,Stage2,技法;technique;烹饪技法;做法;炒法;烧法,technique;cooking method;style,烹饪技法节点，表示烹饪手法,爆炒；红烧
+Taste,Taste,Stage2,味道;taste;口味;风味;口感,taste;flavor,味道节点，表示菜品口味,香辣；清淡
+Cuisine,Cuisine,Stage2,菜系;cuisine;帮菜;流派;地方菜,cuisine;style;regional,菜系节点，表示地域流派,川菜；粤菜
+Ingredient,Ingredient,Stage2,食材;主料;材料;ingredient;main,ingredient;main ingredient,食材节点（主料/配料共用）,黄牛肉；青椒
+Seasoning,Seasoning,Stage2,调味品;seasoning;调料;调味料;佐料,seasoning;condiment;spice,调味品节点，表示调味料,生抽；料酒
+MealTime,MealTime,Stage2,用餐时间;meal_time;适宜时间;推荐时间;什么时候吃,meal time;suitable time,推荐用餐时间节点,午餐；晚餐
+CookingMethod,CookingMethod,Stage2,烹饪方法;method;烹饪法;cooking_method,method;cooking method,烹饪方法节点（区别于技法）,先炒后煮；干煸

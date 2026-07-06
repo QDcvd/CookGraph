@@ -1,2 +1,0 @@
-D:\anaconda3\Lib\site-packages\paramiko\transport.py:219: CryptographyDeprecationWarning: Blowfish has been deprecated and will be removed in a future release
-  "class": algorithms.Blowfish,

@@ -1,0 +1,22 @@
+source_column,entity_type,attr_name,data_type,query_keywords_zh,query_keywords_en,is_searchable,description
+id_type,Molecule,id_type,string,标识类型;ID类型;类型;type,id type;identifier type,false,Molecule标识符类型（smiles或inchi）
+roles,Molecule,roles,list,角色;roles;功能;role,roles;function,false,Molecule在反应中的角色列表（reactant/product）
+properties,Molecule,properties,dict,属性;properties;化合物属性;分子属性,properties;compound properties,false,化合物扩展属性字典（CAS、PubChemID等）
+reaction_number,Reaction,reaction_number,string,反应编号;编号;number;ID;reaction id,reaction number;identifier,true,反应唯一编号（如RXN001）
+created_at,Reaction,created_at,datetime,创建时间;时间戳;timestamp,created at;timestamp,false,节点创建时间戳
+name,Reaction,name,string,反应名称;名称;反应名;reaction name,name;title,true,反应名称（如Fructose + Glycine）
+name,Catalog_1,name,string,分类名;目录名;类别名,category name;catalog name,true,一级分类名称
+name,Catalog_2,name,string,分类名;目录名;类别名,category name;catalog name,true,二级分类名称
+name,AA_Sugar,name,string,标记名;组合名;标记,marker name;combination name,true,氨基酸-糖组合标记名称
+name,Reactant_SMILES,name,string,反应物名;结构名;SMILES名,reactant name;structure,true,反应物SMILES字符串值
+order,Reactant_SMILES,order,integer,序号;顺序;order;number,order;sequence,false,反应物在反应中的序号（1,2,3...）
+linked_molecule,Reactant_SMILES,linked_molecule,reference,关联分子;链接分子; molecule link,linked molecule;references,false,关联的统一Molecule节点ID
+name,Product_SMILES,name,string,产物名;结构名;SMILES名,product name;structure,true,产物SMILES字符串值
+order,Product_SMILES,order,integer,序号;顺序;order;number,order;sequence,false,产物在反应中的序号（1,2,3...）
+linked_molecule,Product_SMILES,linked_molecule,reference,关联分子;链接分子; molecule link,linked molecule;references,false,关联的统一Molecule节点ID
+name,Reactant_InChI,name,string,反应物InChI名;标准式名,reactant InChI name;standard name,true,反应物InChI字符串值
+order,Reactant_InChI,order,integer,序号;顺序;order;number,order;sequence,false,反应物InChI序号
+name,Product_InChI,name,string,产物InChI名;标准式名,product InChI name;standard name,true,产物InChI字符串值
+order,Product_InChI,order,integer,序号;顺序;order;number,order;sequence,false,产物InChI序号
+name,Reaction_SMILES,name,string,反应式;方程;equation,reaction equation;overall SMILES,true,反应整体SMILES表示
+name,Reaction_InChI,name,string,反应标准式;InChI方程,reaction InChI;overall InChI,true,反应整体InChI表示

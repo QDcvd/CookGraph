@@ -1,0 +1,9 @@
+relation_type,source_entity,target_entity,edge_properties,query_keywords_forward,query_keywords_reverse,description
+USES_TECHNIQUE,Dish,Technique,none,技法;technique;怎么做;做法,哪些菜用了;什么菜是;使用;采用,菜品使用的烹饪技法
+HAS_TASTE,Dish,Taste,none,味道;taste;口味;风味,什么味道;口味为;风味是,菜品具有的味道
+BELONGS_TO_CUISINE,Dish,Cuisine,none,菜系;cuisine;属于;归类,哪个菜系;属于;归于,菜品所属的菜系
+USES_MAIN_INGREDIENT,Dish,Ingredient,amount,主要食材;主料;食材;main;包含食材,包含;含有;用了;主要食材有;主料为,菜品使用的主要食材（带用量）
+USES_AUXILIARY,Dish,Ingredient,amount,配料;辅料;auxiliary,配料有;辅料为;加了,使用配料的菜式,配料用量
+USES_SEASONING,Dish,Seasoning,amount,调味品;seasoning;调料;用了什么调料,用了什么调料;调味品有;调料包含,菜品使用的调味品（带用量）
+SUITABLE_FOR,Dish,MealTime,none,用餐时间;推荐用餐时间;适宜时间;meal_time,适合;适宜;什么时候吃;推荐时间,菜品适合的用餐时间
+USES_METHOD,Dish,CookingMethod,none,烹饪方法;method;烹饪法;方法,使用什么方法;采用方法;烹饪方法为,菜品采用的烹饪方法
