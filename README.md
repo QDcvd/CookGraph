@@ -76,24 +76,65 @@ python start.py --adapter agent_adapter_local_LLM
 python start.py --adapter agent_adapter
 ```
 
-## 首次安装
+## 首次安装（推荐：uv，无 conda）
+
+```bash
+# Git Bash / WSL / Linux / macOS
+bash deploy_uv.sh
+```
+
+脚本会：
+
+- 创建 `.venv` 虚拟环境。
+- 用 `uv` 安装后端依赖。
+- 用 `npm ci` 安装前端依赖。
+- 后端和前端依赖会并行安装。
+- 默认使用阿里云 PyPI 镜像和 npmmirror 镜像加速。
+
+如果新电脑还没有下载 embedding 模型，运行：
+
+```bash
+bash deploy_uv.sh --with-model
+```
+
+部署完成后启动：
+
+```bash
+.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM_harness
+```
+
+部署完成后直接启动：
+
+```bash
+bash deploy_uv.sh --with-model --start
+```
+
+可覆盖镜像源：
+
+```bash
+UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+NPM_REGISTRY=https://registry.npmmirror.com \
+HF_ENDPOINT=https://hf-mirror.com \
+bash deploy_uv.sh --with-model
+```
+
+## 旧版安装（conda，不推荐）
 
 ```bash
 bash setup.sh
 ```
 
-脚本会创建 `minicook` conda 环境，并安装前端依赖和后端依赖。
+`setup.sh` 会创建 `minicook` conda 环境，并安装前端依赖和后端依赖。新电脑部署优先使用 `deploy_uv.sh`。
 
 手动安装方式：
 
 ```bash
-conda create -n minicook python=3.11 -y
-conda activate minicook
-pip install "fastapi[standard]" uvicorn langchain langchain-openai langgraph python-dotenv ddgs paramiko networkx
+uv venv .venv --python 3.10
+uv pip install --python .venv/Scripts/python.exe -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
 cd frontend
-npm install
+npm ci --registry https://registry.npmmirror.com
 cd ..
-python start.py
+.venv/Scripts/python.exe start.py
 ```
 
 ## 本地模型配置
@@ -130,8 +171,7 @@ LLM_SSH_TUNNEL=0
 后端：
 
 ```bash
-conda activate minicook
-uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+.venv/Scripts/uvicorn.exe backend.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 前端：
