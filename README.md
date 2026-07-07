@@ -51,6 +51,7 @@ miniCookingAgent-Demo/
 ├── docker/
 │   └── docker-entrypoint.sh
 ├── deploy_uv.sh                              # uv 一键部署脚本
+├── start_docker.sh                           # Docker 一键构建并启动脚本
 ├── .env.example
 ├── requirements.txt
 └── start.py
@@ -140,42 +141,46 @@ cd /e/miniCookingAgent-Demo
 .venv/Scripts/python.exe start.py --adapter agent_adapter
 ```
 
-## Docker 依赖环境
+## Docker 一键启动
 
-项目提供一个只包含依赖环境的 Docker 镜像。镜像不会内置项目源码、`.env` 或模型文件；运行时通过 volume 读取本机项目目录。
+项目提供 Docker 一键启动脚本。镜像会在构建时安装 Python/前端依赖，并下载 `gte-large-zh` embedding 模型到 `/opt/minicook/models/gte-large-zh`；项目源码和 `.env` 仍通过 volume 从本机读取。
 
-构建镜像：
-
-```bash
-docker build -t minicooking-agent-env .
-```
-
-构建时默认使用镜像源，并并行安装 Python 与前端依赖。可覆盖镜像源：
+直接启动：
 
 ```bash
-docker build \
-  --build-arg APT_MIRROR=mirrors.aliyun.com \
-  --build-arg UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
-  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
-  -t minicooking-agent-env .
+bash start_docker.sh
 ```
 
-挂载当前项目进入容器：
+脚本会自动：
+
+- 构建或复用 `minicooking-agent-env` 镜像。
+- 挂载当前项目到容器 `/workspace`。
+- 映射后端 `8000` 和前端 `5173`。
+- 启动 `python start.py --adapter agent_adapter_local_LLM_harness`。
+- 通过 `MINICOOK_EMBEDDING_MODEL_DIR` 使用镜像内置 embedding 模型。
+
+常用选项：
 
 ```bash
-docker run --rm -it \
-  -p 8000:8000 -p 5173:5173 \
-  -v "$PWD:/workspace" \
-  minicooking-agent-env
+# 强制重新构建镜像
+bash start_docker.sh --rebuild
+
+# 改宿主机端口
+bash start_docker.sh --backend-port 18000 --frontend-port 15173
+
+# 切换模型下载来源
+MODEL_SOURCE=huggingface bash start_docker.sh --rebuild
 ```
 
-容器内启动：
+Docker 构建默认使用镜像源，并并行安装 Python 与前端依赖。可覆盖：
 
-```bash
-python start.py --adapter agent_adapter_local_LLM_harness
+```ini
+APT_MIRROR=mirrors.aliyun.com
+UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+NPM_REGISTRY=https://registry.npmmirror.com
+MODEL_SOURCE=modelscope
+MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
 ```
-
-Docker 镜像不内置 embedding 模型。需要语义召回时，先在宿主机运行 `bash deploy_uv.sh` 下载模型，或把已有模型目录挂载到 `/workspace/models/gte-large-zh`。
 
 ## 本地模型配置
 

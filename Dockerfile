@@ -7,6 +7,10 @@ ARG UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG UV_CONCURRENT_DOWNLOADS=8
 ARG UV_CONCURRENT_BUILDS=4
+ARG MODEL_SOURCE=modelscope
+ARG MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
+ARG MODEL_REPO=thenlper/gte-large-zh
+ARG HF_ENDPOINT=https://hf-mirror.com
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_INDEX_URL=${UV_INDEX_URL} \
@@ -15,6 +19,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_CONCURRENT_DOWNLOADS=${UV_CONCURRENT_DOWNLOADS} \
     UV_CONCURRENT_BUILDS=${UV_CONCURRENT_BUILDS} \
     NPM_CONFIG_REGISTRY=${NPM_REGISTRY} \
+    MODEL_SOURCE=${MODEL_SOURCE} \
+    MODELSCOPE_MODEL_ID=${MODELSCOPE_MODEL_ID} \
+    MODEL_REPO=${MODEL_REPO} \
+    HF_ENDPOINT=${HF_ENDPOINT} \
+    MINICOOK_EMBEDDING_MODEL_DIR=/opt/minicook/models/gte-large-zh \
     PATH=/opt/venv/bin:/opt/minicook/frontend/node_modules/.bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8
@@ -69,7 +78,29 @@ RUN set -eux; \
     wait "$frontend_pid"; \
     rm -rf /root/.cache /tmp/minicook
 
+RUN set -eux; \
+    mkdir -p /opt/minicook/models; \
+    if [ "${MODEL_SOURCE}" = "modelscope" ]; then \
+      /opt/venv/bin/uv pip install \
+        --python /opt/venv/bin/python \
+        --index-url "${UV_INDEX_URL}" \
+        modelscope; \
+      /opt/venv/bin/python -c 'import os; from modelscope import snapshot_download; snapshot_download(os.environ["MODELSCOPE_MODEL_ID"], local_dir=os.environ["MINICOOK_EMBEDDING_MODEL_DIR"]); print("model ready:", os.environ["MINICOOK_EMBEDDING_MODEL_DIR"])'; \
+    elif [ "${MODEL_SOURCE}" = "huggingface" ] || [ "${MODEL_SOURCE}" = "hf" ]; then \
+      /opt/venv/bin/uv pip install \
+        --python /opt/venv/bin/python \
+        --index-url "${UV_INDEX_URL}" \
+        huggingface-hub; \
+      /opt/venv/bin/python -c 'import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id=os.environ["MODEL_REPO"], local_dir=os.environ["MINICOOK_EMBEDDING_MODEL_DIR"], local_dir_use_symlinks=False, resume_download=True); print("model ready:", os.environ["MINICOOK_EMBEDDING_MODEL_DIR"])'; \
+    else \
+      echo "unknown MODEL_SOURCE=${MODEL_SOURCE}" >&2; \
+      exit 1; \
+    fi; \
+    test -f /opt/minicook/models/gte-large-zh/config.json; \
+    test -f /opt/minicook/models/gte-large-zh/modules.json; \
+    rm -rf /root/.cache
+
 EXPOSE 8000 5173
 
 ENTRYPOINT ["minicook-entrypoint"]
-CMD ["bash"]
+CMD ["python", "start.py", "--adapter", "agent_adapter_local_LLM_harness"]

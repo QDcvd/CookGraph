@@ -22,7 +22,7 @@ from typing import Iterable
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "gte-large-zh"
+DEFAULT_MODEL_PATH = Path(os.getenv("MINICOOK_EMBEDDING_MODEL_DIR") or PROJECT_ROOT / "models" / "gte-large-zh")
 DEFAULT_RECIPE_XLSX = PROJECT_ROOT / "doc" / "菜谱.xlsx"
 DEFAULT_ALIAS_PATH = PROJECT_ROOT / "config" / "recipe_aliases.json"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / "backend" / ".cache"
