@@ -321,7 +321,17 @@ def check_turn_assertions(turn: dict, turn_spec: dict) -> list[dict]:
             detail="本轮无期望工具要求",
         ))
 
-    # 2. expect_web_fallback
+    # 2. forbid_tools
+    forbid_tools = turn_spec.get("forbid_tools", [])
+    if forbid_tools:
+        found_forbidden_tools = [t for t in forbid_tools if t in tool_names]
+        assertions.append(dict(
+            name="forbid_tools",
+            passed=len(found_forbidden_tools) == 0,
+            detail=f"禁止工具: {forbid_tools}, 实际工具: {tool_names}" + (f", 发现: {found_forbidden_tools}" if found_forbidden_tools else ", 未出现"),
+        ))
+
+    # 3. expect_web_fallback
     if turn_spec.get("expect_web_fallback"):
         has_web = "web_search_tool" in tool_names
         assertions.append(dict(
@@ -330,7 +340,7 @@ def check_turn_assertions(turn: dict, turn_spec: dict) -> list[dict]:
             detail=f"期望联网兜底, 工具列表: {tool_names}",
         ))
 
-    # 3. expect_any_keywords
+    # 4. expect_any_keywords
     any_keywords = turn_spec.get("expect_any_keywords", [])
     if any_keywords:
         full_text = assistant_text + "\n" + events_text
@@ -341,7 +351,7 @@ def check_turn_assertions(turn: dict, turn_spec: dict) -> list[dict]:
             detail=f"期望关键词之一: {any_keywords}" + (f", 命中: {[kw for kw in any_keywords if kw in full_text]}" if hit else ", 未命中"),
         ))
 
-    # 4. expect_all_keywords
+    # 5. expect_all_keywords
     all_keywords = turn_spec.get("expect_all_keywords", [])
     if all_keywords:
         full_text = assistant_text + "\n" + events_text
@@ -352,7 +362,7 @@ def check_turn_assertions(turn: dict, turn_spec: dict) -> list[dict]:
             detail=f"期望全部关键词: {all_keywords}" + (f", 缺失: {missing}" if missing else ", 全部命中"),
         ))
 
-    # 5. forbid_keywords — 带中文否定感知
+    # 6. forbid_keywords — 带中文否定感知
     forbid_kw = turn_spec.get("forbid_keywords", [])
     if forbid_kw:
         found = _find_forbidden_with_negation_check(assistant_text, forbid_kw)

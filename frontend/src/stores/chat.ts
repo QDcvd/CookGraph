@@ -81,6 +81,7 @@ export const useChatStore = defineStore('chat', {
           text: msg.content,
           isUser: msg.type === 'human',
           ragTrace: msg.rag_trace || null,
+          tokenUsage: msg.rag_trace?.token_usage || null,
         }));
       } catch (error: any) {
         const errMsg = error.response?.data?.detail || error.message || '加载会话失败';
@@ -129,6 +130,7 @@ export const useChatStore = defineStore('chat', {
         ragTrace: null,
         ragSteps: [],
         _groupedSteps: [],
+        tokenUsage: null,
       });
       const botMsgIdx = this.messages.length - 1;
 
@@ -186,6 +188,12 @@ export const useChatStore = defineStore('chat', {
                   msg._groupedSteps = this.appendRagStepToGroups(msg._groupedSteps || [], { label: data.content, icon: '🧠' });
                 } else if (data.type === 'trace') {
                   this.messages[botMsgIdx].ragTrace = data.rag_trace;
+                  this.messages[botMsgIdx].tokenUsage = data.rag_trace?.token_usage || this.messages[botMsgIdx].tokenUsage || null;
+                } else if (data.type === 'token_usage') {
+                  this.messages[botMsgIdx].tokenUsage = data.token_usage;
+                  if (this.messages[botMsgIdx].ragTrace) {
+                    this.messages[botMsgIdx].ragTrace.token_usage = data.token_usage;
+                  }
                 } else if (data.type === 'rag_step') {
                   const msg = this.messages[botMsgIdx];
                   if (!msg.ragSteps) msg.ragSteps = [];

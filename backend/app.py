@@ -183,6 +183,7 @@ async def chat_stream(body: ChatRequest):
         """SSE 事件生成器"""
         full_response = ""
         rag_trace = None
+        token_usage = None
         try:
             async for event in stream_search_agent(body.message, history):
                 if os.getenv("MINICOOK_LLM_DEBUG", "").strip().lower() in {"1", "true", "yes", "on", "debug"}:
@@ -191,10 +192,20 @@ async def chat_stream(body: ChatRequest):
                     full_response += event.get("content", "")
                 elif event.get("type") == "trace":
                     rag_trace = event.get("rag_trace")
+                    if token_usage and isinstance(rag_trace, dict):
+                        rag_trace["token_usage"] = token_usage
+                elif event.get("type") == "token_usage":
+                    token_usage = event.get("token_usage")
+                    if isinstance(rag_trace, dict):
+                        rag_trace["token_usage"] = token_usage
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
             # 保存 AI 回复到会话（从 stream 中收集完整文本）
             if full_response:
+                if token_usage:
+                    if not isinstance(rag_trace, dict):
+                        rag_trace = {}
+                    rag_trace["token_usage"] = token_usage
                 add_message(body.session_id, "ai", full_response, rag_trace=rag_trace)
                 if rag_trace:
                     next_context = update_context_from_trace(

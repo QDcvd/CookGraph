@@ -68,6 +68,7 @@ export interface RagTrace {
   sub_traces?: any[];
   initial_retrieved_chunks?: RetrievedChunk[];
   expanded_retrieved_chunks?: RetrievedChunk[];
+  token_usage?: TokenUsage | null;
 }
 
 export interface RagStep {
@@ -88,6 +89,17 @@ export interface GroupedRagStep {
   collapsed: boolean;
 }
 
+export interface TokenUsage {
+  completion_tokens_estimated: number;
+  completion_chars?: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  source?: 'estimated' | 'provider' | 'mixed' | string;
+  final?: boolean;
+  model_rounds?: number;
+}
+
 export interface Message {
   text: string;
   isUser: boolean;
@@ -95,6 +107,7 @@ export interface Message {
   ragTrace?: RagTrace | null;
   ragSteps?: RagStep[];
   _groupedSteps?: GroupedRagStep[];
+  tokenUsage?: TokenUsage | null;
 }
 
 export interface ChatSession {

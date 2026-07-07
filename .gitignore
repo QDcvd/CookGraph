@@ -16,6 +16,9 @@ venv/
 # ── 模型文件（大文件，需要单独下载） ──
 models/
 
+# ── 运行时数据库 ──
+data/
+
 # ── 前端 ──
 frontend/node_modules/
 frontend/dist/

@@ -1,7 +1,12 @@
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+# 确保项目根目录在 sys.path 中
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from backend.context_manager import build_runtime_memory_context
 from backend.preference_memory import (

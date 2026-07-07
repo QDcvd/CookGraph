@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """多轮对话测试数据集 — 供 run_multiturn_dialogue_test.py 使用。
 
-共 9 个 case，分三类：memory / distraction / contradiction。
+共 10 个 case，分三类：memory / distraction / contradiction。
 
-注意：后续轮次（turn > 1）不设置 expect_tools，因为 agent
-可从历史对话中获取信息，不重复调工具是合理行为。
+注意：是否设置 expect_tools 取决于该轮是否是新的菜谱/联网任务。
+如果后续轮次提出了新的菜名或新的菜谱请求，仍应设置 expect_tools。
 """
 
 from typing import Any
@@ -159,6 +159,59 @@ MULTITURN_TEST_CASES: list[dict[str, Any]] = [
                 expect_tools=[],
                 expect_any_keywords=["糖醋里脊", "调味", "糖醋"],
                 forbid_keywords=["新闻", "热搜"],
+            ),
+        ],
+    ),
+    dict(
+        id="distraction_004",
+        category="distraction",
+        description="顺序干扰与工具指令遵循——菜谱、天气、闲聊、荒诞菜、上下文那、新菜谱依次出现",
+        expected_behavior=(
+            "菜谱类轮次必须调用 recipe_query_tool；非菜谱闲聊不能调用菜谱工具；"
+            "荒诞但形式明确的单菜谱问题应先查本地图谱，未命中后联网兜底；"
+            "带'那'的新菜名清蒸鲈鱼不能被误解为钉子炒螺丝；最后凉拌黄瓜也必须走工具链"
+        ),
+        forbidden_behavior="天气/你好污染菜谱上下文，或未调用工具却凭常识编造菜谱做法",
+        turns=[
+            dict(
+                user="告诉我西红柿炒鸡蛋怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["西红柿炒鸡蛋", "番茄炒蛋", "鸡蛋"],
+                forbid_keywords=["钉子炒螺丝", "凉拌黄瓜", "清蒸鲈鱼"],
+            ),
+            dict(
+                user="今天天气怎么样",
+                expect_tools=[],
+                forbid_tools=["recipe_query_tool"],
+                expect_any_keywords=[],
+                forbid_keywords=["西红柿炒鸡蛋", "番茄炒蛋", "钉子炒螺丝"],
+            ),
+            dict(
+                user="你好",
+                expect_tools=[],
+                forbid_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=[],
+                forbid_keywords=["西红柿炒鸡蛋", "番茄炒蛋", "钉子炒螺丝"],
+            ),
+            dict(
+                user="我想吃钉子炒螺丝",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["钉子炒螺丝", "未找到", "本地图谱", "联网"],
+                forbid_keywords=["根据本地菜谱图谱，钉子炒螺丝可以这样做"],
+                expect_web_fallback=True,
+            ),
+            dict(
+                user="那清蒸鲈鱼怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["清蒸鲈鱼", "鲈鱼", "蒸"],
+                forbid_keywords=["钉子炒螺丝", "西红柿炒鸡蛋", "番茄炒蛋"],
+            ),
+            dict(
+                user="告诉我，凉拌黄瓜的做法",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["凉拌黄瓜", "未找到", "本地图谱", "联网"],
+                forbid_keywords=["未启用 RAG", "根据本地菜谱图谱，凉拌黄瓜可以这样做"],
+                expect_web_fallback=True,
             ),
         ],
     ),

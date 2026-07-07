@@ -2215,6 +2215,39 @@ body {
     width: 100%;
 }
 
+.token-usage-badge {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    color: #6f6257;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+.token-usage-item,
+.token-usage-mini {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 24px;
+    padding: 3px 8px;
+    border: 1px solid rgba(43, 33, 24, 0.16);
+    border-radius: 8px;
+    background: rgba(255, 248, 223, 0.78);
+}
+
+.token-usage-source {
+    color: #9a8d81;
+    font-size: 0.72rem;
+}
+
+.token-usage-mini {
+    color: #8a7d72;
+    background: rgba(255, 255, 255, 0.45);
+}
+
 .attach-btn {
     color: #6f5d4d;
 }
