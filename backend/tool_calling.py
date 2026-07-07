@@ -242,6 +242,79 @@ def _parse_missing_tool_router_response(raw_text: str) -> dict | None:
 # Trace 记录
 # ---------------------------------------------------------------------------
 
+def _first_regex_group(pattern: str, text: str) -> str | None:
+    match = re.search(pattern, text, flags=re.DOTALL)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _parse_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _parse_semantic_candidates(text: str) -> list[dict[str, Any]]:
+    candidates_text = _first_regex_group(r"候选：(.+?)(?:；(?:alias|$)|$)", text)
+    if not candidates_text:
+        return []
+    candidates = []
+    for name, score in re.findall(r"([^；,，()（）]+)[(（]([0-9.]+)[)）]", candidates_text):
+        candidates.append({"name": name.strip(), "score": _parse_float(score)})
+    return candidates
+
+
+def _parse_recipe_hybrid_retrieval(content: str) -> dict[str, Any] | None:
+    """Parse the semantic retrieval summary appended by recipe_query_tool."""
+    marker = "语义召回摘要："
+    if marker not in content:
+        return None
+
+    summary = content.split(marker, 1)[1].strip()
+    if not summary:
+        return None
+
+    accepted = "混合召回改写：" in summary
+    skipped = "混合召回跳过：" in summary
+    not_rewritten = "混合召回未改写：" in summary
+    payload: dict[str, Any] = {
+        "strategy": "alias + lexical + dense + rrf",
+        "accepted": accepted,
+        "skipped": skipped,
+        "not_rewritten": not_rewritten,
+        "summary": summary[:1000],
+        "candidates": _parse_semantic_candidates(summary),
+    }
+
+    fields = {
+        "original_query": r"原问题=(.+?)；",
+        "standard_dish": r"标准菜名=(.+?)；",
+        "matched_text": r"命中文本=(.+?)；",
+        "rewritten_query": r"改写查询=(.+?)；",
+        "top": r"top=(.+?)\s+score=",
+        "score": r"score=([0-9.]+)",
+        "margin": r"margin=([0-9.]+)",
+        "alias_debug": r"alias=\[(.*?)\]\s+lexical=",
+        "lexical_debug": r"lexical=\[(.*?)\]\s+dense=",
+        "dense_debug": r"dense=\[(.*?)\]\s*$",
+    }
+    for key, pattern in fields.items():
+        value = _first_regex_group(pattern, summary)
+        if key in {"score", "margin"}:
+            payload[key] = _parse_float(value)
+        elif value is not None:
+            payload[key] = value
+
+    if "standard_dish" not in payload and "top" in payload:
+        payload["standard_dish"] = payload["top"]
+
+    return payload
+
+
 def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, content: str) -> None:
     """将工具执行结果记录到 trace 中。"""
     trace["tool_used"] = True
@@ -284,6 +357,12 @@ def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, conten
             }
         )
     elif tool_name == "recipe_query_tool":
+        hybrid_retrieval = _parse_recipe_hybrid_retrieval(content)
+        if hybrid_retrieval:
+            trace["hybrid_retrieval"] = hybrid_retrieval
+            trace["retrieval_mode"] = "hybrid_recipe_kg"
+            trace["retrieval_pipeline"] = "alias + char_ngram_tfidf + gte-large-zh + rrf + knowledge_graph"
+            trace["retrieval_top_k"] = len(hybrid_retrieval.get("candidates") or [])
         trace["retrieved_chunks"].append(
             {
                 "filename": "recipe_query_tool",

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.staticfiles import StaticFiles
 
+from backend.chat_persistence import init_db as init_chat_db
 from backend.schemas import AuthRequest, AuthResponse, UserInfo, ChatRequest
 from backend.memory_store import (
     create_session,
@@ -20,9 +22,13 @@ from backend.memory_store import (
     delete_session,
     add_message,
     get_messages,
+    get_recipe_context,
+    update_recipe_context,
     update_session_title,
 )
-from backend.context_manager import build_agent_history
+from backend.context_manager import build_agent_history, build_runtime_memory_context
+from backend.preference_memory import apply_preference_actions, list_preferences
+from backend.session_recipe_context import update_context_from_trace
 from backend.rag_stub import router as rag_router
 import importlib
 
@@ -45,7 +51,15 @@ print(
 
 # ── FastAPI 应用 ──
 
-app = FastAPI(title="MiniCookingAgent-Demo")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动时初始化持久化表。"""
+    init_chat_db()
+    print("[app] chat_persistence 表已就绪", flush=True)
+    yield
+
+
+app = FastAPI(title="MiniCookingAgent-Demo", lifespan=lifespan)
 
 # CORS：允许前端开发服务器访问
 app.add_middleware(
@@ -149,6 +163,7 @@ async def chat_stream(body: ChatRequest):
 
     # 保存用户消息
     add_message(body.session_id, "human", body.message)
+    apply_preference_actions(body.message, source_session_id=body.session_id)
 
     # 构造历史消息格式（给 agent_adapter 使用）
     all_msgs = get_messages(body.session_id)
@@ -157,6 +172,12 @@ async def chat_stream(body: ChatRequest):
     # 这类追问失去指向。现在统一交给 context_manager 做 Zleap 风格的上下文投影：
     # message + synthetic tool_call/tool_result + trace context note。
     history = build_agent_history(all_msgs[:-1])  # 排除刚加入的用户消息
+    runtime_memory = build_runtime_memory_context(
+        preferences=list_preferences(),
+        recipe_context=get_recipe_context(body.session_id),
+    )
+    if runtime_memory:
+        history.insert(0, {"role": "runtime_memory", "content": runtime_memory})
 
     async def event_generator():
         """SSE 事件生成器"""
@@ -175,6 +196,13 @@ async def chat_stream(body: ChatRequest):
             # 保存 AI 回复到会话（从 stream 中收集完整文本）
             if full_response:
                 add_message(body.session_id, "ai", full_response, rag_trace=rag_trace)
+                if rag_trace:
+                    next_context = update_context_from_trace(
+                        get_recipe_context(body.session_id),
+                        body.message,
+                        rag_trace,
+                    )
+                    update_recipe_context(body.session_id, next_context)
             yield "data: [DONE]\n\n"
         except asyncio.CancelledError:
             raise

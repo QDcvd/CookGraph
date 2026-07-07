@@ -10,6 +10,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -68,15 +69,136 @@ def _get_recipe_system(kg_path: str | None = None) -> Any:
 
 def _looks_like_reverse_recipe_query(query: str) -> bool:
     """识别不应改写成具体菜名的反向查询。"""
+    normalized = _normalize_query_text(query)
+    if re.search(r"有(?:什么|哪些).{0,8}菜", normalized):
+        return True
     reverse_patterns = [
         "哪些菜",
         "哪些菜式",
-        "什么菜",
         "有什么菜",
         "有哪些菜",
         "哪道菜",
     ]
     return any(pattern in query for pattern in reverse_patterns)
+
+
+def _normalize_query_text(query: str) -> str:
+    """Normalize short Chinese user text for intent checks."""
+    return re.sub(r"\s+", "", query.lower())
+
+
+def _looks_like_non_recipe_query(query: str) -> bool:
+    """Hard guard for obvious non-recipe chatter or general questions."""
+    text = _normalize_query_text(query)
+    if not text:
+        return True
+
+    exact_non_recipe = {
+        "你好",
+        "您好",
+        "嗨",
+        "hi",
+        "hello",
+        "你是谁",
+        "你是什么模型",
+        "你能做什么",
+    }
+    if text in exact_non_recipe:
+        return True
+
+    non_recipe_keywords = [
+        "天气",
+        "几点",
+        "日期",
+        "股票",
+        "新闻",
+        "电影",
+        "音乐",
+        "模型",
+    ]
+    recipe_keywords = [
+        "菜",
+        "菜谱",
+        "做法",
+        "怎么做",
+        "烹饪",
+        "配料",
+        "食材",
+        "调料",
+        "火候",
+        "火力",
+        "备菜",
+        "下锅",
+        "炒",
+        "蒸",
+        "煮",
+        "炸",
+        "煎",
+        "炖",
+        "拌",
+        "烤",
+    ]
+    return any(keyword in text for keyword in non_recipe_keywords) and not any(
+        keyword in text for keyword in recipe_keywords
+    )
+
+
+def _looks_like_single_recipe_query(query: str) -> bool:
+    """Whether a miss can reasonably fall back to web search as one dish."""
+    text = _normalize_query_text(query)
+    if not text or _looks_like_non_recipe_query(text) or _looks_like_reverse_recipe_query(text):
+        return False
+
+    unsupported_open_patterns = [
+        "哪些",
+        "有哪些",
+        "有什么菜",
+        "推荐",
+        "菜单",
+        "适合",
+        "不用",
+        "不放",
+        "能做几道",
+        "能做哪些",
+        "空气炸锅",
+        "小电锅",
+    ]
+    if any(pattern in text for pattern in unsupported_open_patterns):
+        return False
+
+    single_recipe_markers = [
+        "怎么做",
+        "做法",
+        "烹饪方法",
+        "是什么菜",
+        "介绍一下",
+        "讲讲",
+        "配料",
+        "食材",
+        "调料",
+        "火候",
+        "火力",
+        "备菜",
+        "下锅",
+        "蒸几分钟",
+    ]
+    if any(marker in text for marker in single_recipe_markers):
+        return True
+
+    # A short bare dish name like "麻婆豆腐" is still a single-dish query.
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]{2,10}", text))
+
+
+def _format_intent_rejection(query: str, reason: str) -> str:
+    """Return a structured tool result that will not trigger web fallback."""
+    return (
+        f"菜谱查询未执行：{reason}\n\n"
+        "结构化摘要：\n"
+        "success: False\n"
+        "match_mode: none\n"
+        "intent: out_of_scope\n"
+        "web_fallback_allowed: False"
+    )
 
 
 def _kg_dish_names(system: Any) -> set[str]:
@@ -102,6 +224,15 @@ def _semantic_rewrite_query(query: str, system: Any) -> tuple[str, RecipeSemanti
         return query, None, None
 
     candidates = "；".join(f"{name}({score:.3f})" for name, score in match.candidates)
+    if match.accepted and not match.matched_text:
+        note = (
+            "混合召回未改写："
+            f"top={match.dish_name} score={match.score:.3f} margin={match.margin:.3f}；"
+            "原因=未能在用户问题中定位菜名/别名强证据；"
+            f"候选：{candidates}；{match.retrieval_debug}"
+        )
+        return query, match, note
+
     if not match.accepted:
         note = (
             "混合召回未改写："
@@ -159,6 +290,9 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
     if not text:
         return "菜谱查询失败：query 不能为空。"
 
+    if _looks_like_non_recipe_query(text):
+        return _format_intent_rejection(text, "当前问题不是单道菜谱查询。")
+
     # 检查 KG 文件
     resolved_kg = Path(kg_path or DEFAULT_RECIPE_KG_PATH).resolve()
     if not resolved_kg.is_file():
@@ -197,6 +331,7 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
     if (
         semantic_match is not None
         and semantic_match.accepted
+        and semantic_match.matched_text
         and effective_query != semantic_match.dish_name
         and not _result_is_success(result)
     ):
@@ -225,6 +360,8 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
             summary_parts.append(f"query_type: {result['query_type']}")
         if result.get("match_mode"):
             summary_parts.append(f"match_mode: {result['match_mode']}")
+        if not _result_is_success(result):
+            summary_parts.append(f"web_fallback_allowed: {_looks_like_single_recipe_query(text)}")
 
         if summary_parts:
             parts.append("结构化摘要：\n" + "\n".join(summary_parts))

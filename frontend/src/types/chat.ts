@@ -9,6 +9,26 @@ export interface RetrievedChunk {
 export interface RagTrace {
   tool_used?: boolean;
   tool_name?: string;
+  hybrid_retrieval?: {
+    strategy?: string;
+    accepted?: boolean;
+    skipped?: boolean;
+    not_rewritten?: boolean;
+    original_query?: string;
+    standard_dish?: string;
+    matched_text?: string;
+    rewritten_query?: string;
+    score?: number | null;
+    margin?: number | null;
+    candidates?: Array<{
+      name: string;
+      score?: number | null;
+    }>;
+    alias_debug?: string;
+    lexical_debug?: string;
+    dense_debug?: string;
+    summary?: string;
+  };
   retrieval_stage?: string;
   grade_score?: number;
   grade_route?: string;

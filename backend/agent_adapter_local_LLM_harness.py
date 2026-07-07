@@ -175,9 +175,11 @@ def _build_tool_loop_system_prompt(tools: list[Any]) -> str:
         "- 运行时已经把上面的工具作为结构化 tools schema 传给模型；需要工具时必须发起正式 tool_call，不要在文字里假装调用。\n"
         "- 当前使用 /no_think 模式，请不要输出隐藏推理过程，把 token 留给工具调用和最终答案。\n"
         "- 如果用户明确点名某个工具，就调用该工具。\n"
-        "- 如果用户询问菜谱、菜品做法、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，或问“哪些菜用了某食材/技法”，优先调用 recipe_query_tool；不要先调用 web_search_tool。\n"
+        "- 如果用户的输入像是在询问某道菜、某个菜式、想吃某道菜，或询问菜谱、菜品做法、怎么做、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，或问“哪些菜用了某食材/技法”，必须先调用 recipe_query_tool；不要直接凭常识回答，也不要先调用 web_search_tool。\n"
+        "- 如果用户只是打招呼、问天气、问模型身份，或其他明显非菜谱问题，不要调用 recipe_query_tool。\n"
+        "- 例如“辣椒炒肉怎么做”“我想吃清蒸鲈鱼”“西红柿炒鸡蛋的配料”“小炒黄牛肉火候怎么控制”都必须调用 recipe_query_tool。\n"
         "- recipe_query_tool 返回的是本地菜谱知识图谱结果；最终回答必须优先依据该工具结果。如果工具未找到，再说明本地图谱未命中，不要编造做法。\n"
-        "- 当 recipe_query_tool 未命中时，系统可能自动补充 web_search_tool；最终回答要区分“本地图谱结果”和“联网补充资料”。\n"
+        "- 当 recipe_query_tool 返回 web_fallback_allowed: True 且本地图谱未命中时，系统可能自动补充 web_search_tool；最终回答要区分“本地图谱结果”和“联网补充资料”。\n"
         "- 只有当用户明确要求网页搜索、网络搜索、联网查询、在线查找、最新信息，或本地菜谱知识图谱未命中且需要公共网页补充时，才调用 web_search_tool。\n"
         "- find_tool 和 read_file_tool 当前未注册，不能调用；如果用户要求查找或读取本地文件，请说明当前暂未启用本地文件工具。\n"
         "- 工具返回结果后，必须以最新工具结果作为最高优先级证据；如果它与历史回答或你的先验冲突，明确纠正旧说法，再给最终答案。\n"
@@ -193,10 +195,14 @@ def _recipe_query_needs_web_fallback(content: str) -> bool:
     text = str(content or "")
     if not text.strip():
         return True
+    if "web_fallback_allowed: False" in text:
+        return False
+    if "web_fallback_allowed: True" in text and "success: False" in text:
+        return True
     if "为您找到相似" in text:
         return False
     if "success: False" in text:
-        return True
+        return False
     miss_markers = [
         "未找到菜品",
         "未找到使用",
@@ -224,13 +230,18 @@ async def _execute_web_fallback_after_recipe(
     return executed_name, executed_args, content
 
 
-async def _emit_final_answer_from_tool_context(user_text: str, trace: dict, tool_context: list[dict]):
+async def _emit_final_answer_from_tool_context(
+    user_text: str,
+    trace: dict,
+    tool_context: list[dict],
+    runtime_memory: str = "",
+):
     """工具执行完成后，用不绑定 tools 的普通模型整理最终回答。"""
     yield {"type": "trace", "rag_trace": trace}
     yield {"type": "rag_step", "step": {"label": "正在整理最终回答...", "icon": "✍️"}}
     try:
         async with asyncio.timeout(FINAL_ANSWER_TIMEOUT_SECONDS):
-            async for event in _stream_model_answer(_build_final_prompt(user_text, trace, tool_context)):
+            async for event in _stream_model_answer(_build_final_prompt(user_text, trace, tool_context, runtime_memory)):
                 yield event
     except asyncio.TimeoutError:
         reason = f"最终回答生成超时：超过 {FINAL_ANSWER_TIMEOUT_SECONDS}s；我先基于工具结果给出摘要。"
@@ -380,7 +391,7 @@ def _build_missing_tool_router_prompt(user_text: str, history: list[dict]) -> li
         "1. 如果用户询问菜谱、菜品做法、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，选择 recipe_query_tool。\n"
         "2. 如果用户明确需要外部、在线、最新或公共网页信息，选择 web_search_tool。\n"
         "3. 如果用户要查找本地路径、读取文件、查看项目或 README，返回 null，因为本地文件工具当前未注册。\n"
-        "4. 如果用户只是普通聊天、写作或基于已有上下文已经能回答，返回 null。\n"
+        "4. 如果用户只是普通聊天、打招呼、问天气、问模型身份、写作或基于已有上下文已经能回答，返回 null。\n"
         "5. 参数必须尽量具体，不要用空对象敷衍。"
     )
     return [SystemMessage(content=system), HumanMessage(content=_with_no_think(user))]
@@ -559,12 +570,14 @@ def _build_tool_loop_messages(user_text: str, history: list[dict]) -> list[Any]:
             messages.append(ToolMessage(content=str(content or ""), tool_call_id=tool_call_id, name=tool_name))
         elif role == "context":
             messages.append(("user", f"<历史工具上下文>\n{content}\n</历史工具上下文>"))
+        elif role == "runtime_memory":
+            messages.append(("user", str(content or "")))
     messages.append(("user", _with_no_think(user_text)))
     return messages
 
 
 
-def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict]) -> list[Any]:
+def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict], runtime_memory: str = "") -> list[Any]:
     context_lines = []
     for index, item in enumerate(tool_context, start=1):
         context_lines.append(
@@ -581,12 +594,22 @@ def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict]) -
     )
     user = (
         f"用户问题：\n{user_text}\n\n"
+        f"运行时记忆：\n{runtime_memory or '无'}\n\n"
         f"已收集的工具上下文：\n{context}\n\n"
         f"检索摘要：\n"
         f"- 已用工具：{[call.get('tool_name') for call in trace.get('tool_calls', [])]}\n"
         "请用中文写出干净、直接的最终回答。"
     )
     return [SystemMessage(content=system), HumanMessage(content=_with_no_think(user))]
+
+
+def _runtime_memory_from_history(history: list[dict]) -> str:
+    parts = [
+        str(item.get("content") or "").strip()
+        for item in history
+        if item.get("role") == "runtime_memory" and str(item.get("content") or "").strip()
+    ]
+    return "\n\n".join(parts)
 
 
 def _build_route_prompt(user_text: str) -> list[Any]:
@@ -666,6 +689,9 @@ def _build_direct_chat_prompt(user_text: str, history: list[dict]) -> list[Any]:
             )
         )
     ]
+    for msg in history:
+        if msg.get("role") == "runtime_memory" and msg.get("content"):
+            messages.append(("user", str(msg.get("content"))))
     for msg in history[-6:]:
         role = msg.get("role")
         content = msg.get("content", "")
@@ -715,6 +741,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
         "max_consecutive_tool_calls": MAX_CONSECUTIVE_TOOL_CALLS,
     }
     messages = _build_tool_loop_messages(user_text, history)
+    runtime_memory = _runtime_memory_from_history(history)
     model = get_tool_bound_model()
     tool_context: list[dict] = []
     continue_nudges = 0
@@ -801,7 +828,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                         "detail": web_content[:180],
                                     },
                                 }
-                        async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context):
+                        async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory):
                             yield event
                         return
 
@@ -939,7 +966,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                         return
 
                 if tool_context:
-                    async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context):
+                    async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory):
                         yield event
                     return
 

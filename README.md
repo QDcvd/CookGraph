@@ -96,6 +96,112 @@ cd ..
 python start.py
 ```
 
+## uv 一键部署
+
+推荐在 Git Bash 中运行：
+
+```bash
+bash deploy_uv.sh
+```
+
+常用选项：
+
+```bash
+# 默认会安装前后端依赖，并下载 embedding 模型
+bash deploy_uv.sh
+
+# 跳过模型下载
+bash deploy_uv.sh --skip-model
+
+# 跳过前端依赖，只安装后端依赖并下载 embedding 模型
+bash deploy_uv.sh --skip-frontend
+
+# 部署完成后直接启动
+bash deploy_uv.sh --start
+```
+
+脚本默认会把 `gte-large-zh` embedding 模型下载到 `models/gte-large-zh`。如不需要模型，使用 `--skip-model`。脚本默认使用 ModelScope，国内网络更稳：
+
+```bash
+MODEL_SOURCE=modelscope bash deploy_uv.sh
+```
+
+如需切回 HuggingFace 或 HuggingFace 镜像：
+
+```bash
+MODEL_SOURCE=huggingface HF_ENDPOINT=https://hf-mirror.com bash deploy_uv.sh
+```
+
+可覆盖变量：
+
+```ini
+UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+NPM_REGISTRY=https://registry.npmmirror.com
+MODEL_SOURCE=modelscope
+MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
+MODEL_REPO=thenlper/gte-large-zh
+MODEL_DIR=./models/gte-large-zh
+HF_ENDPOINT=https://hf-mirror.com
+UV_CONCURRENT_DOWNLOADS=8
+UV_CONCURRENT_BUILDS=4
+```
+
+Windows 注意事项：
+
+- 如果系统里的 `bash` 是 `C:\Windows\System32\bash.exe`，它会进入 WSL。不要用 WSL bash 混跑已有 Windows `.venv`，容易出现 WSL 里找不到 `uv/pip` 或创建 Linux venv 的问题。
+- 推荐安装 Git Bash 后运行 `bash deploy_uv.sh ...`。
+- 如果没有 Git Bash，可以在 PowerShell 里用 Windows 侧 `.venv` 手动下载模型：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install modelscope -i https://mirrors.aliyun.com/pypi/simple
+@'
+from modelscope import snapshot_download
+snapshot_download(
+    "AI-ModelScope/gte-large-zh",
+    local_dir=r"E:\miniCookingAgent-Demo\models\gte-large-zh",
+)
+'@ | .\.venv\Scripts\python.exe -
+```
+
+如果 HuggingFace 镜像报 `SSL: UNEXPECTED_EOF_WHILE_READING`，通常是镜像 HTTPS 连接被中途断开。优先改用默认的 `MODEL_SOURCE=modelscope`，不需要修改项目代码。
+
+## Docker 依赖环境
+
+项目提供一个只包含依赖环境的 Docker 镜像。镜像不会内置项目源码、`.env` 或模型文件；运行时通过 volume 读取本机项目目录。
+
+构建镜像：
+
+```bash
+docker build -t minicooking-agent-env .
+```
+
+构建时默认使用镜像源，并并行安装 Python 与前端依赖。可覆盖镜像源：
+
+```bash
+docker build \
+  --build-arg APT_MIRROR=mirrors.aliyun.com \
+  --build-arg UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
+  --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+  -t minicooking-agent-env .
+```
+
+挂载当前项目进入容器：
+
+```bash
+docker run --rm -it \
+  -p 8000:8000 -p 5173:5173 \
+  -v "$PWD:/workspace" \
+  minicooking-agent-env
+```
+
+容器内启动：
+
+```bash
+python start.py --adapter agent_adapter_local_LLM_harness
+```
+
+如果需要 embedding 模型，请在宿主机先运行 `bash deploy_uv.sh` 下载到 `models/gte-large-zh`，或额外挂载已有模型目录到 `/workspace/models/gte-large-zh`。
+
 ## 本地模型配置
 
 `.env` 里已经按本地模型模式配置：
