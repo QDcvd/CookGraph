@@ -1,13 +1,15 @@
 # MiniCookingAgent-Demo — 迷你烹饪问答机器人
 
-这是一个迷你烹饪问答机器人项目，基于 FastAPI + Vue + 本地模型工具循环实现，面向菜谱、食材、菜单文件和项目资料检索等中文问答场景。
+这是一个迷你烹饪问答机器人项目，基于 FastAPI + Vue + OpenAI 兼容本地/远端模型工具循环实现，面向菜谱、食材和烹饪技法等中文问答场景。
 
 ## 能做什么
 
 - 直接回答烹饪、食材、菜谱、菜单相关问题。
 - 使用 `recipe_query_tool` 查询本地菜谱知识图谱（38814 个节点、15 万条关系），支持正向属性查询、反向关系查询、完整档案查询。
-- 使用 `web_search_tool` 联网搜索公开网页资料。
+- 使用 `web_search_tool` 联网搜索公开网页资料（本地图谱未命中时自动兜底）。
 - 可自动通过 SSH 隧道连接远端 LM Studio 的 OpenAI 兼容 API。
+- **对话持久化**：后端重启后用同一个 `session_id` 恢复对话历史和菜谱上下文。
+- **偏好记忆**：跨会话记住用户偏好（通过 SQLite 持久化）。
 
 ## 项目结构
 
@@ -15,7 +17,7 @@
 miniCookingAgent-Demo/
 ├── backend/
 │   ├── app.py                              # FastAPI 主应用
-│   ├── context_manager.py                  # 对话上下文组装
+│   ├── context_manager.py                  # 对话上下文组装（Zleap 风格）
 │   ├── agent_adapter_local_LLM_harness.py  # 推荐适配器（工具循环）
 │   ├── agent_adapter_local_LLM.py          # 本地 vLLM 基础版
 │   ├── agent_adapter.py                    # DeepSeek API 适配器
@@ -23,6 +25,10 @@ miniCookingAgent-Demo/
 │   ├── tool_calling.py                     # 工具调用解析/执行/trace
 │   ├── recipe_query_adapter.py             # 菜谱查询适配器
 │   ├── recipe_semantic_retriever.py        # 语义召回改写层
+│   ├── memory_store.py                     # 会话内存缓存 + SQLite 持久化
+│   ├── chat_persistence.py                 # SQLite 读写层（chat_sessions / chat_messages）
+│   ├── preference_memory.py                # 用户偏好记忆存储
+│   ├── session_recipe_context.py           # 当前会话菜谱上下文管理
 │   └── 4-V1菜谱查询recipe_query-查询火力.py  # 菜谱知识图谱查询系统
 ├── config/
 │   ├── chem+recipe_kg_updated_fire.pkl     # 菜谱知识图谱（约 16MB）
@@ -32,22 +38,81 @@ miniCookingAgent-Demo/
 │   ├── src/
 │   └── package.json
 ├── test/
-│   ├── recipe_test_data.py                 # 100 条测试用例数据
-│   └── run_recall_test.py                  # 召回率测试运行器
-├── reference/
+│   ├── recipe_test_data.py                   # 100 条单轮测试用例数据
+│   ├── run_recall_test.py                    # 召回率测试运行器（可联网兜底）
+│   ├── multiturn_test_data.py                # 9 个多轮对话测试 case
+│   ├── run_multiturn_dialogue_test.py        # 多轮对话测试运行器（真实 agent 链路）
+│   ├── test_chat_persistence.py              # 对话持久化单元测试
+│   └── test_zleap_lite_memory.py             # Zleap-lite 记忆系统测试
+├── doc/
+│   ├── zleap_lite_chat_persistence_plan.md   # 持久化设计方案
+│   └── memory_zleap_lite_plan.md             # 记忆系统设计
+├── Dockerfile                                # 依赖环境 Docker 镜像
+├── docker/
+│   └── docker-entrypoint.sh
+├── deploy_uv.sh                              # uv 一键部署脚本
+├── start_docker.sh                           # Docker 一键构建并启动脚本
 ├── .env.example
-├── .gitignore
-├── setup.sh
+├── requirements.txt
 └── start.py
 ```
 
-## 快速启动
+## 新机器部署
 
-推荐在 Git Bash 或 Anaconda Prompt 中运行：
+推荐使用 uv 部署脚本。它会安装后端依赖、前端依赖，并默认下载 `gte-large-zh` embedding 模型到 `models/gte-large-zh`：
 
 ```bash
-cd /g/miniCookingAgent-Demo
-python start.py
+bash deploy_uv.sh
+```
+
+常用选项：
+
+```bash
+# 跳过模型下载
+bash deploy_uv.sh --skip-model
+
+# 跳过前端依赖，只安装后端依赖并下载 embedding 模型
+bash deploy_uv.sh --skip-frontend
+
+# 部署完成后直接启动
+bash deploy_uv.sh --start
+
+# 网络或 CI 环境下顺序安装，便于定位失败日志
+bash deploy_uv.sh --no-parallel
+```
+
+脚本默认使用国内镜像源：
+
+```ini
+UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+NPM_REGISTRY=https://registry.npmmirror.com
+MODEL_SOURCE=modelscope
+MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
+UV_CONCURRENT_DOWNLOADS=8
+UV_CONCURRENT_BUILDS=4
+```
+
+如果 HuggingFace 镜像报 `SSL: UNEXPECTED_EOF_WHILE_READING`，优先使用默认的 `MODEL_SOURCE=modelscope`。
+
+Windows 建议：
+
+- 推荐在 Git Bash 里运行 `bash deploy_uv.sh`。
+- 如果系统里的 `bash` 是 `C:\Windows\System32\bash.exe`，它会进入 WSL。不要用 WSL bash 混跑 Windows `.venv`。
+
+## 快速启动
+
+PowerShell：
+
+```powershell
+cd E:\miniCookingAgent-Demo
+.\.venv\Scripts\python.exe start.py
+```
+
+Git Bash：
+
+```bash
+cd /e/miniCookingAgent-Demo
+.venv/Scripts/python.exe start.py
 ```
 
 默认会启动：
@@ -59,82 +124,62 @@ python start.py
 调试大模型返回值：
 
 ```bash
-python start.py --debug-llm
+.venv/Scripts/python.exe start.py --debug-llm
 ```
 
 禁用远端 LM Studio SSH 隧道：
 
 ```bash
-python start.py --no-llm-tunnel
+.venv/Scripts/python.exe start.py --no-llm-tunnel
 ```
 
 手动指定适配器：
 
 ```bash
-python start.py --adapter agent_adapter_local_LLM_harness
-python start.py --adapter agent_adapter_local_LLM
-python start.py --adapter agent_adapter
-```
-
-## 首次安装（推荐：uv，无 conda）
-
-```bash
-# Git Bash / WSL / Linux / macOS
-bash deploy_uv.sh
-```
-
-脚本会：
-
-- 创建 `.venv` 虚拟环境。
-- 用 `uv` 安装后端依赖。
-- 用 `npm ci` 安装前端依赖。
-- 后端和前端依赖会并行安装。
-- 默认使用阿里云 PyPI 镜像和 npmmirror 镜像加速。
-
-如果新电脑还没有下载 embedding 模型，运行：
-
-```bash
-bash deploy_uv.sh --with-model
-```
-
-部署完成后启动：
-
-```bash
 .venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM_harness
+.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM
+.venv/Scripts/python.exe start.py --adapter agent_adapter
 ```
 
-部署完成后直接启动：
+## Docker 一键启动
+
+项目提供 Docker 一键启动脚本。镜像会在构建时安装 Python/前端依赖，并下载 `gte-large-zh` embedding 模型到 `/opt/minicook/models/gte-large-zh`；项目源码和 `.env` 仍通过 volume 从本机读取。
+
+直接启动：
 
 ```bash
-bash deploy_uv.sh --with-model --start
+bash start_docker.sh
 ```
 
-可覆盖镜像源：
+脚本会自动：
+
+- 构建或复用 `minicooking-agent-env` 镜像。
+- 挂载当前项目到容器 `/workspace`。
+- 映射后端 `8000` 和前端 `5173`。
+- 启动 `python start.py --adapter agent_adapter_local_LLM_harness`。
+- 通过 `MINICOOK_EMBEDDING_MODEL_DIR` 使用镜像内置 embedding 模型。
+
+常用选项：
 
 ```bash
-UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-NPM_REGISTRY=https://registry.npmmirror.com \
-HF_ENDPOINT=https://hf-mirror.com \
-bash deploy_uv.sh --with-model
+# 强制重新构建镜像
+bash start_docker.sh --rebuild
+
+# 改宿主机端口
+bash start_docker.sh --backend-port 18000 --frontend-port 15173
+
+# 切换模型下载来源
+MODEL_SOURCE=huggingface bash start_docker.sh --rebuild
 ```
 
-## 旧版安装（conda，不推荐）
+Docker 构建默认使用镜像源，并并行安装 Python 与前端依赖。可覆盖：
 
-```bash
-bash setup.sh
-```
-
-`setup.sh` 会创建 `minicook` conda 环境，并安装前端依赖和后端依赖。新电脑部署优先使用 `deploy_uv.sh`。
-
-手动安装方式：
-
-```bash
-uv venv .venv --python 3.10
-uv pip install --python .venv/Scripts/python.exe -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
-cd frontend
-npm ci --registry https://registry.npmmirror.com
-cd ..
-.venv/Scripts/python.exe start.py
+```ini
+APT_MIRROR=mirrors.aliyun.com
+UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+NPM_REGISTRY=https://registry.npmmirror.com
+MODEL_SOURCE=modelscope
+MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
 ```
 
 ## 本地模型配置
@@ -170,8 +215,8 @@ LLM_SSH_TUNNEL=0
 
 后端：
 
-```bash
-.venv/Scripts/uvicorn.exe backend.app:app --host 0.0.0.0 --port 8000 --reload
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 前端：
@@ -192,45 +237,84 @@ npm run dev
 
 为了保护远端模型服务，工具循环有三层限制：
 
-- `MAX_TOOL_TURNS`：最多模型工具回合数。
-- `MAX_TOTAL_TOOL_CALLS`：本轮总工具调用上限。
-- `MAX_CONSECUTIVE_TOOL_CALLS`：同一个工具最多连续调用次数。
+- `MAX_TOOL_TURNS`：最多模型工具回合数（默认 10）。
+- `MAX_TOTAL_TOOL_CALLS`：本轮总工具调用上限（默认 16）。
+- `MAX_CONSECUTIVE_TOOL_CALLS`：同一个工具最多连续调用次数（默认 5）。
 
 达到限制后，后端会基于已掌握的工具结果生成阶段性总结，而不是继续无限调用。
 
+## 多轮记忆与持久化
+
+项目实现了轻量级的 Zleap-lite 记忆系统：
+
+1. **会话菜谱上下文**：当前会话的最近菜品、查询、菜谱摘要，注入到每轮 prompt 中，支持"它蒸多久""刚才那道菜"等指代追问。
+2. **用户偏好记忆**：通过 SQLite 跨会话保存用户偏好（如口味偏好、常用食材）。
+3. **对话持久化**：后端重启后用同一个 `session_id` 恢复完整对话历史、trace 和菜谱上下文。
+
+### 存储结构
+
+| 表 | 用途 |
+| --- | --- |
+| `chat_sessions` | 会话元信息 + 菜谱上下文快照 |
+| `chat_messages` | 顺序消息 + assistant 的 `rag_trace_json` |
+
+写入路径同时写内存缓存和 SQLite；`get_session()` 先查内存，未命中则从 SQLite hydrate。
+
 ## 调试与测试
 
-### 单独测试菜谱知识图谱查询
+### 编译检查
 
 ```bash
-# Git Bash（推荐）
-PYTHONIOENCODING=utf-8 /d/anaconda3/envs/bigdog/python.exe "backend/4-V1菜谱查询recipe_query-查询火力.py" -k "config/chem+recipe_kg_updated_fire.pkl" "小炒黄牛肉的做法"
-
-# PowerShell
-$env:PYTHONIOENCODING='utf-8'; python "backend/4-V1菜谱查询recipe_query-查询火力.py" -k "config/chem+recipe_kg_updated_fire.pkl" "小炒黄牛肉的做法"
+python -m compileall backend start.py
 ```
 
-如果不加 `PYTHONIOENCODING=utf-8`，Windows 控制台（GBK 编码）会输出乱码。
+### 测试总览
 
-支持多种查询类型：
+| 测试类型 | 运行命令 | 用例数 | 覆盖 |
+| ------- | ------- | ----- | ---- |
+| 单轮召回率 | `python test/run_recall_test.py --phase all` | 100 条 | 正向/反向/模糊/边界 + 联网兜底 |
+| 多轮对话 | `python test/run_multiturn_dialogue_test.py --all` | 9 个 case | 记忆/抗干扰/逻辑自洽 + DeepSeek LLM 裁判 |
+| 持久化 | `python test/test_chat_persistence.py` | 6 项 | SQLite round-trip / hydrate / archive |
 
-| 查询类型 | 示例 |
-|---------|------|
-| 正向属性查询（做法/火力/备菜） | `"小炒黄牛肉的烹饪过程"` |
-| 正向属性查询（配料） | `"小炒黄牛肉的配料有哪些"` |
-| 完整档案查询 | `"西红柿炒鸡蛋"` |
-| 反向查询（哪些菜用了某技法） | `"哪些菜用了炝炒技法"` |
-| 反向查询（哪些菜用了某食材） | `"主要食材包含黄牛肉的菜"` |
+### 多轮对话测试
 
-### 验证 adapter 包装
+测试 agent 行为的三大能力：
 
 ```bash
-# 通过 adapter 调用（自动处理 KG 路径、编码、异常兜底）
-PYTHONIOENCODING=utf-8 python -c "
-from backend.recipe_query_adapter import query_recipe_kg
-print(query_recipe_kg('小炒黄牛肉的做法')[:2000])
-"
+# 全部类别
+python test/run_multiturn_dialogue_test.py --all
+
+# 单独跑某一类
+python test/run_multiturn_dialogue_test.py --category memory
+python test/run_multiturn_dialogue_test.py --category distraction
+python test/run_multiturn_dialogue_test.py --category contradiction
 ```
+
+多轮测试使用**真实 agent 链路**（`stream_search_agent`），不走 mock。DeepSeek 作为 LLM 裁判，输出结构化 JSON 判定每个 case 是否通过。配置 `DEEPSEEK_API_KEY` 环境变量启用裁判。
+
+### 召回率测试
+
+```bash
+# 第一阶段（核心 50 条）
+PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase 1
+
+# 第二阶段（扩展 50 条）
+PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase 2
+
+# 全量 100 条
+PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase all
+```
+
+### 测试输出
+
+- `test/test_results.json` — 单轮测试详细结果
+- `test/test_report.md` — 单轮测试报告
+- `test/multiturn_test_results.json` — 多轮测试详细结果
+- `test/multiturn_test_report.md` — 多轮测试报告
+
+### 知识图谱文件
+
+菜谱知识图谱位于 `config/chem+recipe_kg_updated_fire.pkl`（约 16MB），包含 **38814 个节点、147352 条关系**。依赖 `networkx` 库反序列化。
 
 ### 验证工具列表注册
 
@@ -246,47 +330,8 @@ python -c "from backend.tool_calling import _parse_textual_tool_call; print(_par
 # 期望输出：{'name': 'recipe_query_tool', 'args': {'query': '西红柿炒鸡蛋怎么做'}}
 ```
 
-### 编译检查
+### 持久化单元测试
 
 ```bash
-python -m compileall backend start.py
+PYTHONIOENCODING=utf-8 python test/test_chat_persistence.py
 ```
-
-### 知识图谱文件
-
-菜谱知识图谱位于 `config/chem+recipe_kg_updated_fire.pkl`（约 16MB），包含 **38814 个节点、147352 条关系**。依赖 `networkx` 库反序列化。
-
-## 召回率测试
-
-项目内置了 **100 条测试用例** 的召回率测试框架，覆盖正向查询、反向查询、口语化、场景化、边界情况等 8 个维度。
-
-### 运行测试
-
-```bash
-# 第一阶段（核心 55 条）
-PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase 1
-
-# 第二阶段（扩展 45 条）
-PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase 2
-
-# 全量 100 条
-PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase all
-```
-
-### 测试输出
-
-- **`test/test_results.json`** — 每条用例的详细结果（含耗时、命中状态）
-- **`test/test_report.md`** — 召回率报告（总体 + 各维度召回率 + 失败用例列表）
-
-### 测试用例分布
-
-| 维度 | 条数 | 说明 |
-|------|------|------|
-| 正向-属性 | 1-20 | 精确菜名+属性查询 |
-| 正向-档案 | 21-26 | 纯菜名完整档案 |
-| 反向查询 | 27-40 | 技法/味道/菜系/食材反查 |
-| 模糊/口语化 | 41-55 | 别名、缩写、泛称 |
-| 场景化对话 | 56-70 | 日常做饭场景 |
-| 边界情况 | 71-84 | 不存在的菜、空输入、闲聊 |
-| 特色数据 | 85-92 | 火力/备菜/下锅专项 |
-| 交叉查询 | 93-100 | 技法+菜系+食材组合 |

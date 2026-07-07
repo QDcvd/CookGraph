@@ -38,12 +38,14 @@
         </template>
       </template>
     </div>
+    <TokenUsageBadge :usage="msg.tokenUsage" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { useChatStore } from '@/stores/chat';
 import type { Message } from '@/types/chat';
+import TokenUsageBadge from './TokenUsageBadge.vue';
 
 const props = defineProps<{
   msg: Message;

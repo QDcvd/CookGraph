@@ -5,12 +5,22 @@ set -Eeuo pipefail
 #
 # 用法：
 #   bash deploy_uv.sh
+<<<<<<< HEAD
 #   bash deploy_uv.sh --with-model
 #   bash deploy_uv.sh --with-model --start
+=======
+#   bash deploy_uv.sh --start
+#   bash deploy_uv.sh --skip-model
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
 #
 # 可覆盖的镜像变量：
 #   UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 #   NPM_REGISTRY=https://registry.npmmirror.com
+<<<<<<< HEAD
+=======
+#   MODEL_SOURCE=modelscope
+#   MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
 #   HF_ENDPOINT=https://hf-mirror.com
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +31,7 @@ UV_INDEX_URL="${UV_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}"
 UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL:-}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+<<<<<<< HEAD
 MODEL_REPO="${MODEL_REPO:-thenlper/gte-large-zh}"
 MODEL_DIR="${MODEL_DIR:-$ROOT_DIR/models/gte-large-zh}"
 UV_BIN="${UV_BIN:-}"
@@ -29,6 +40,22 @@ WITH_MODEL=0
 START_AFTER=0
 SKIP_FRONTEND=0
 SKIP_BACKEND=0
+=======
+MODEL_SOURCE="${MODEL_SOURCE:-modelscope}"
+MODELSCOPE_MODEL_ID="${MODELSCOPE_MODEL_ID:-AI-ModelScope/gte-large-zh}"
+MODEL_REPO="${MODEL_REPO:-thenlper/gte-large-zh}"
+MODEL_DIR="${MODEL_DIR:-$ROOT_DIR/models/gte-large-zh}"
+UV_BIN="${UV_BIN:-}"
+UV_CONCURRENT_DOWNLOADS="${UV_CONCURRENT_DOWNLOADS:-8}"
+UV_CONCURRENT_BUILDS="${UV_CONCURRENT_BUILDS:-4}"
+UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+
+WITH_MODEL=1
+START_AFTER=0
+SKIP_FRONTEND=0
+SKIP_BACKEND=0
+NO_PARALLEL=0
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
 
 log() {
   printf '\033[1;32m[deploy]\033[0m %s\n' "$*"
@@ -51,20 +78,43 @@ MiniCookingAgent-Demo 一键部署脚本（uv 版）
   bash deploy_uv.sh [选项]
 
 选项：
+<<<<<<< HEAD
   --with-model       同时下载 gte-large-zh embedding 模型到 models/gte-large-zh
   --start            部署完成后执行 python start.py 启动前后端
   --skip-frontend    跳过前端 npm ci
   --skip-backend     跳过后端 uv pip install
+=======
+  --with-model       下载 gte-large-zh embedding 模型到 models/gte-large-zh（默认开启）
+  --skip-model       跳过 embedding 模型下载
+  --start            部署完成后执行 python start.py 启动前后端
+  --skip-frontend    跳过前端 npm ci
+  --skip-backend     跳过后端 uv pip install
+  --no-parallel      不并行安装前后端依赖，改为顺序执行
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
   -h, --help         显示帮助
 
 常用镜像变量：
   UV_INDEX_URL       Python 包镜像，默认 https://mirrors.aliyun.com/pypi/simple
   NPM_REGISTRY       npm 镜像，默认 https://registry.npmmirror.com
+<<<<<<< HEAD
   HF_ENDPOINT        HuggingFace 镜像，默认 https://hf-mirror.com
   PYTHON_VERSION     uv 创建虚拟环境用的 Python 版本，默认 3.10
 
 示例：
   bash deploy_uv.sh --with-model
+=======
+  MODEL_SOURCE       模型下载来源：modelscope 或 huggingface，默认 modelscope
+  MODELSCOPE_MODEL_ID ModelScope 模型 ID，默认 AI-ModelScope/gte-large-zh
+  HF_ENDPOINT        HuggingFace 镜像，仅 MODEL_SOURCE=huggingface 时使用，默认 https://hf-mirror.com
+  PYTHON_VERSION     uv 创建虚拟环境用的 Python 版本，默认 3.10
+  UV_CONCURRENT_DOWNLOADS uv 并发下载数，默认 8
+  UV_CONCURRENT_BUILDS    uv 并发构建数，默认 4
+
+示例：
+  bash deploy_uv.sh
+  bash deploy_uv.sh --skip-model
+  MODEL_SOURCE=huggingface bash deploy_uv.sh
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
   UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple bash deploy_uv.sh
 EOF
 }
@@ -75,6 +125,13 @@ while [[ $# -gt 0 ]]; do
       WITH_MODEL=1
       shift
       ;;
+<<<<<<< HEAD
+=======
+    --skip-model)
+      WITH_MODEL=0
+      shift
+      ;;
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
     --start)
       START_AFTER=1
       shift
@@ -87,6 +144,13 @@ while [[ $# -gt 0 ]]; do
       SKIP_BACKEND=1
       shift
       ;;
+<<<<<<< HEAD
+=======
+    --no-parallel)
+      NO_PARALLEL=1
+      shift
+      ;;
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
     -h|--help)
       usage
       exit 0
@@ -168,6 +232,11 @@ path_for_python_literal() {
   local value="$1"
   if command -v cygpath >/dev/null 2>&1; then
     cygpath -w "$value"
+<<<<<<< HEAD
+=======
+  elif command -v wslpath >/dev/null 2>&1 && [[ "$(venv_python)" == *.exe ]]; then
+    wslpath -w "$value"
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
   else
     printf '%s\n' "$value"
   fi
@@ -190,7 +259,16 @@ setup_backend() {
   resolve_uv_bin
 
   log "创建/复用 uv 虚拟环境：$VENV_DIR"
+<<<<<<< HEAD
   "$UV_BIN" venv "$VENV_DIR" --python "$PYTHON_VERSION"
+=======
+  log "（使用 --python-preference only-system，避免从 GitHub 下载 standalone Python）"
+  # --python-preference only-system 让 uv 使用已安装的 Python，不从 GitHub 下载 standalone 构建
+  if ! "$UV_BIN" venv "$VENV_DIR" --python "$PYTHON_VERSION" --python-preference only-system 2>/dev/null; then
+    log "uv 创建 venv 失败，尝试用系统 Python 直接创建虚拟环境..."
+    python -m venv "$VENV_DIR" 2>/dev/null || python3 -m venv "$VENV_DIR" 2>/dev/null || die "无法创建虚拟环境，请确保已安装 Python $PYTHON_VERSION"
+  fi
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
 
   local install_args=(
     pip install
@@ -203,8 +281,16 @@ setup_backend() {
     install_args+=(--extra-index-url "$UV_EXTRA_INDEX_URL")
   fi
 
+<<<<<<< HEAD
   log "安装后端依赖（uv，并发解析/下载，镜像：$UV_INDEX_URL）"
   "$UV_BIN" "${install_args[@]}"
+=======
+  log "安装后端依赖（uv，并发下载=$UV_CONCURRENT_DOWNLOADS，并发构建=$UV_CONCURRENT_BUILDS，镜像：$UV_INDEX_URL）"
+  UV_LINK_MODE="$UV_LINK_MODE" \
+  UV_CONCURRENT_DOWNLOADS="$UV_CONCURRENT_DOWNLOADS" \
+  UV_CONCURRENT_BUILDS="$UV_CONCURRENT_BUILDS" \
+    "$UV_BIN" "${install_args[@]}"
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
 }
 
 setup_frontend() {
@@ -219,6 +305,7 @@ setup_frontend() {
   log "配置 npm 镜像：$NPM_REGISTRY"
   npm config set registry "$NPM_REGISTRY" >/dev/null
 
+<<<<<<< HEAD
   log "安装前端依赖（npm ci）"
   (
     cd "$FRONTEND_DIR"
@@ -238,6 +325,68 @@ download_model() {
   mkdir -p "$(dirname "$MODEL_DIR")"
 
   log "下载 embedding 模型：$MODEL_REPO -> $MODEL_DIR"
+=======
+  log "安装前端依赖（npm ci，并行下载由 npm 管理）"
+  (
+    cd "$FRONTEND_DIR"
+    npm ci --registry "$NPM_REGISTRY" --prefer-offline --no-audit --fund=false
+  )
+}
+
+install_python_package_if_missing() {
+  local module_name="$1"
+  local package_name="$2"
+  local py
+  py="$(venv_python_for_shell)"
+
+  if "$py" - "$module_name" <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+
+raise SystemExit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
+PY
+  then
+    return
+  fi
+
+  install_uv_if_missing
+  resolve_uv_bin
+  log "安装模型下载依赖：$package_name"
+  UV_LINK_MODE="$UV_LINK_MODE" \
+  UV_CONCURRENT_DOWNLOADS="$UV_CONCURRENT_DOWNLOADS" \
+  UV_CONCURRENT_BUILDS="$UV_CONCURRENT_BUILDS" \
+    "$UV_BIN" pip install \
+    --python "$(venv_python)" \
+    --index-url "$UV_INDEX_URL" \
+    "$package_name"
+}
+
+download_model_from_modelscope() {
+  local py="$1"
+  local model_dir_for_python="$2"
+
+  install_python_package_if_missing "modelscope" "modelscope"
+
+  log "从 ModelScope 下载 embedding 模型：$MODELSCOPE_MODEL_ID -> $MODEL_DIR"
+  "$py" - <<PY
+from modelscope import snapshot_download
+
+path = snapshot_download(
+    "$MODELSCOPE_MODEL_ID",
+    local_dir=r"$model_dir_for_python",
+)
+print("model ready:", path)
+PY
+}
+
+download_model_from_huggingface() {
+  local py="$1"
+  local model_dir_for_python="$2"
+
+  install_python_package_if_missing "huggingface_hub" "huggingface-hub"
+
+  log "从 HuggingFace 下载 embedding 模型：$MODEL_REPO -> $MODEL_DIR"
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
   HF_ENDPOINT="$HF_ENDPOINT" "$py" - <<PY
 from huggingface_hub import snapshot_download
 
@@ -251,6 +400,41 @@ print("model ready:", r"$model_dir_for_python")
 PY
 }
 
+<<<<<<< HEAD
+=======
+download_model() {
+  if [[ "$WITH_MODEL" != "1" ]]; then
+    log "跳过 embedding 模型下载。"
+    return
+  fi
+
+  local py
+  local model_dir_for_python
+  py="$(venv_python_for_shell)"
+  if [[ ! -x "$py" ]]; then
+    die "未找到虚拟环境 Python：$py。默认会下载模型，请不要同时使用 --skip-backend，或先创建 .venv。"
+  fi
+  if [[ -f "$MODEL_DIR/config.json" && -f "$MODEL_DIR/modules.json" ]]; then
+    log "embedding 模型已存在，跳过下载：$MODEL_DIR"
+    return
+  fi
+  model_dir_for_python="$(path_for_python_literal "$MODEL_DIR")"
+  mkdir -p "$(dirname "$MODEL_DIR")"
+
+  case "$MODEL_SOURCE" in
+    modelscope)
+      download_model_from_modelscope "$py" "$model_dir_for_python"
+      ;;
+    huggingface|hf)
+      download_model_from_huggingface "$py" "$model_dir_for_python"
+      ;;
+    *)
+      die "未知 MODEL_SOURCE：$MODEL_SOURCE（可选：modelscope / huggingface）"
+      ;;
+  esac
+}
+
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
 verify_install() {
   local py
   py="$(venv_python_for_shell)"
@@ -326,6 +510,19 @@ run_parallel_installs() {
   log "依赖安装完成。日志：$backend_log / $frontend_log"
 }
 
+<<<<<<< HEAD
+=======
+run_installs() {
+  if [[ "$NO_PARALLEL" == "1" ]]; then
+    log "按顺序安装依赖（--no-parallel）..."
+    setup_backend
+    setup_frontend
+  else
+    run_parallel_installs
+  fi
+}
+
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
 start_app() {
   local py
   py="$(venv_python_for_shell)"
@@ -336,7 +533,11 @@ start_app() {
 main() {
   cd "$ROOT_DIR"
   setup_env_file
+<<<<<<< HEAD
   run_parallel_installs
+=======
+  run_installs
+>>>>>>> d34bcfa2b5c725beaba4fa21c43d434458abfba9
   download_model
   verify_install
 

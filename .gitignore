@@ -16,6 +16,9 @@ venv/
 # ── 模型文件（大文件，需要单独下载） ──
 models/
 
+# ── 运行时数据库 ──
+data/
+
 # ── 前端 ──
 frontend/node_modules/
 frontend/dist/
@@ -27,10 +30,15 @@ backend/.cache/
 # ── 测试输出 ──
 test/test_results.json
 test/test_report.md
+test/multiturn_test_results.json
+test/multiturn_test_report.md
 test/__pycache__/
 
-# ── Claude Code 配置（含本地绝对路径） ──
-.claude/settings.json
+# ── Claude Code 配置 / 技能（可重新安装） ──
+.claude/
+!.claude/settings.example.json
+.agents/
+skills-lock.json
 
 # ── IDE / 系统 ──
 .vscode/
@@ -53,4 +61,5 @@ doc/mmdc-puppeteer-config.json
 # ── 日志 ──
 *.log
 backend-error.log
-.deploy-*.log
+#
+" "

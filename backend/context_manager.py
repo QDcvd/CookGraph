@@ -12,6 +12,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from backend.preference_memory import render_preferences_for_memory
+from backend.session_recipe_context import render_recipe_context
+
 
 MAX_HISTORY_MESSAGES = 12      # 保留的最近历史消息数
 MAX_TRACE_TOOL_CALLS = 6       # 每条 trace 最多还原的工具调用数
@@ -49,6 +52,29 @@ def build_agent_history(session_messages: list[dict]) -> list[dict]:
         history.extend(_trace_to_history_entries(msg.get("rag_trace"), index))
 
     return history
+
+
+def build_runtime_memory_context(preferences: list[dict] | None = None, recipe_context: dict | None = None) -> str:
+    """渲染 Zleap-lite runtime memory 注入块。"""
+    parts = [
+        render_preferences_for_memory(preferences or []),
+        render_recipe_context(recipe_context or {}),
+    ]
+    body = "\n\n".join(part for part in parts if part.strip())
+    if not body:
+        return ""
+
+    return "\n".join([
+        "<runtime_memory>",
+        body,
+        "",
+        "使用规则：",
+        "- 用户说“它/这道菜/刚才那道菜/这个火候”时，优先指向当前会话最近菜品。",
+        "- 用户长期偏好是跨会话约束，推荐或改写菜谱时必须主动考虑。",
+        "- 当前会话菜谱上下文只用于本 session，不代表用户长期偏好。",
+        "- 如果最新工具结果与 runtime memory 冲突，以最新工具结果为准并纠正旧上下文。",
+        "</runtime_memory>",
+    ])
 
 
 def history_context_summary(history: list[dict]) -> str:

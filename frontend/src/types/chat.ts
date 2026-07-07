@@ -9,6 +9,26 @@ export interface RetrievedChunk {
 export interface RagTrace {
   tool_used?: boolean;
   tool_name?: string;
+  hybrid_retrieval?: {
+    strategy?: string;
+    accepted?: boolean;
+    skipped?: boolean;
+    not_rewritten?: boolean;
+    original_query?: string;
+    standard_dish?: string;
+    matched_text?: string;
+    rewritten_query?: string;
+    score?: number | null;
+    margin?: number | null;
+    candidates?: Array<{
+      name: string;
+      score?: number | null;
+    }>;
+    alias_debug?: string;
+    lexical_debug?: string;
+    dense_debug?: string;
+    summary?: string;
+  };
   retrieval_stage?: string;
   grade_score?: number;
   grade_route?: string;
@@ -48,6 +68,7 @@ export interface RagTrace {
   sub_traces?: any[];
   initial_retrieved_chunks?: RetrievedChunk[];
   expanded_retrieved_chunks?: RetrievedChunk[];
+  token_usage?: TokenUsage | null;
 }
 
 export interface RagStep {
@@ -68,6 +89,17 @@ export interface GroupedRagStep {
   collapsed: boolean;
 }
 
+export interface TokenUsage {
+  completion_tokens_estimated: number;
+  completion_chars?: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  source?: 'estimated' | 'provider' | 'mixed' | string;
+  final?: boolean;
+  model_rounds?: number;
+}
+
 export interface Message {
   text: string;
   isUser: boolean;
@@ -75,6 +107,7 @@ export interface Message {
   ragTrace?: RagTrace | null;
   ragSteps?: RagStep[];
   _groupedSteps?: GroupedRagStep[];
+  tokenUsage?: TokenUsage | null;
 }
 
 export interface ChatSession {

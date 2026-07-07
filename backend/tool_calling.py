@@ -13,6 +13,15 @@ from typing import Any
 
 from backend.agent_tools import _extract_paths_from_tool_text, _get_tools
 
+TOOL_NAME_ALIASES = {
+    "recipe_query": "recipe_query_tool",
+    "recipe": "recipe_query_tool",
+    "菜谱查询": "recipe_query_tool",
+    "web_search": "web_search_tool",
+    "search": "web_search_tool",
+    "联网搜索": "web_search_tool",
+}
+
 
 # ---------------------------------------------------------------------------
 # _execute_tool_call 内部使用的辅助函数（避免从 harness 循环导入）
@@ -40,8 +49,16 @@ def _message_content_to_text(content: Any) -> str:
 def _tool_call_name(call: Any) -> str:
     """从工具调用中提取工具名称。"""
     if isinstance(call, dict):
-        return call.get("name") or call.get("function", {}).get("name") or "tool"
-    return getattr(call, "name", "tool")
+        raw_name = call.get("name") or call.get("function", {}).get("name") or "tool"
+    else:
+        raw_name = getattr(call, "name", "tool")
+    return _normalize_tool_name(str(raw_name))
+
+
+def _normalize_tool_name(tool_name: str) -> str:
+    """Normalize legacy/model-invented tool names to registered tool names."""
+    name = str(tool_name or "").strip()
+    return TOOL_NAME_ALIASES.get(name, name)
 
 
 def _tool_call_args(call: Any) -> dict:
@@ -66,6 +83,7 @@ def _tool_call_id(call: Any, fallback: str) -> str:
 
 def _tool_arg_names(tool_name: str) -> list[str]:
     """根据工具的实际 args schema 返回参数名列表。"""
+    tool_name = _normalize_tool_name(tool_name)
     tool_by_name = {getattr(item, "name", getattr(item, "__name__", "")): item for item in _get_tools()}
     selected = tool_by_name.get(tool_name)
     args = getattr(selected, "args", None)
@@ -150,7 +168,8 @@ def _parse_textual_tool_call(raw_text: str) -> dict | None:
         text = fenced.group(1).strip()
 
     available = [getattr(item, "name", getattr(item, "__name__", "")) for item in _get_tools()]
-    tool_pattern = "|".join(re.escape(name) for name in available if name)
+    accepted_names = list(dict.fromkeys([*available, *TOOL_NAME_ALIASES.keys()]))
+    tool_pattern = "|".join(re.escape(name) for name in accepted_names if name)
     if not tool_pattern:
         return None
 
@@ -159,7 +178,7 @@ def _parse_textual_tool_call(raw_text: str) -> dict | None:
     if jsonish:
         try:
             data = json.loads(jsonish.group(0))
-            name = data.get("name") or data.get("tool_name")
+            name = _normalize_tool_name(data.get("name") or data.get("tool_name"))
             args = data.get("args") or data.get("arguments") or {}
             if name in available and isinstance(args, dict):
                 return {"name": name, "args": args}
@@ -177,9 +196,9 @@ def _parse_textual_tool_call(raw_text: str) -> dict | None:
             rf"(?P<name>{tool_pattern})\s*\((?P<args>.*?)\)",
             text,
             flags=re.DOTALL,
-        )
+    )
     if call_match:
-        name = call_match.group("name")
+        name = _normalize_tool_name(call_match.group("name"))
         args = _parse_textual_tool_args(name, call_match.group("args"))
         return {"name": name, "args": args}
 
@@ -190,7 +209,7 @@ def _parse_textual_tool_call(raw_text: str) -> dict | None:
         flags=re.IGNORECASE | re.DOTALL,
     )
     if action_match:
-        name = action_match.group("name")
+        name = _normalize_tool_name(action_match.group("name"))
         args_text = action_match.group("args").strip()
         args = _parse_textual_tool_args(name, args_text)
         return {"name": name, "args": args}
@@ -228,7 +247,7 @@ def _parse_missing_tool_router_response(raw_text: str) -> dict | None:
         return None
 
     available = {getattr(item, "name", getattr(item, "__name__", "")) for item in _get_tools()}
-    tool_name = str(tool_name).strip()
+    tool_name = _normalize_tool_name(str(tool_name).strip())
     if tool_name not in available:
         return None
 
@@ -241,6 +260,79 @@ def _parse_missing_tool_router_response(raw_text: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # Trace 记录
 # ---------------------------------------------------------------------------
+
+def _first_regex_group(pattern: str, text: str) -> str | None:
+    match = re.search(pattern, text, flags=re.DOTALL)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _parse_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _parse_semantic_candidates(text: str) -> list[dict[str, Any]]:
+    candidates_text = _first_regex_group(r"候选：(.+?)(?:；(?:alias|$)|$)", text)
+    if not candidates_text:
+        return []
+    candidates = []
+    for name, score in re.findall(r"([^；,，()（）]+)[(（]([0-9.]+)[)）]", candidates_text):
+        candidates.append({"name": name.strip(), "score": _parse_float(score)})
+    return candidates
+
+
+def _parse_recipe_hybrid_retrieval(content: str) -> dict[str, Any] | None:
+    """Parse the semantic retrieval summary appended by recipe_query_tool."""
+    marker = "语义召回摘要："
+    if marker not in content:
+        return None
+
+    summary = content.split(marker, 1)[1].strip()
+    if not summary:
+        return None
+
+    accepted = "混合召回改写：" in summary
+    skipped = "混合召回跳过：" in summary
+    not_rewritten = "混合召回未改写：" in summary
+    payload: dict[str, Any] = {
+        "strategy": "alias + lexical + dense + rrf",
+        "accepted": accepted,
+        "skipped": skipped,
+        "not_rewritten": not_rewritten,
+        "summary": summary[:1000],
+        "candidates": _parse_semantic_candidates(summary),
+    }
+
+    fields = {
+        "original_query": r"原问题=(.+?)；",
+        "standard_dish": r"标准菜名=(.+?)；",
+        "matched_text": r"命中文本=(.+?)；",
+        "rewritten_query": r"改写查询=(.+?)；",
+        "top": r"top=(.+?)\s+score=",
+        "score": r"score=([0-9.]+)",
+        "margin": r"margin=([0-9.]+)",
+        "alias_debug": r"alias=\[(.*?)\]\s+lexical=",
+        "lexical_debug": r"lexical=\[(.*?)\]\s+dense=",
+        "dense_debug": r"dense=\[(.*?)\]\s*$",
+    }
+    for key, pattern in fields.items():
+        value = _first_regex_group(pattern, summary)
+        if key in {"score", "margin"}:
+            payload[key] = _parse_float(value)
+        elif value is not None:
+            payload[key] = value
+
+    if "standard_dish" not in payload and "top" in payload:
+        payload["standard_dish"] = payload["top"]
+
+    return payload
+
 
 def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, content: str) -> None:
     """将工具执行结果记录到 trace 中。"""
@@ -284,6 +376,12 @@ def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, conten
             }
         )
     elif tool_name == "recipe_query_tool":
+        hybrid_retrieval = _parse_recipe_hybrid_retrieval(content)
+        if hybrid_retrieval:
+            trace["hybrid_retrieval"] = hybrid_retrieval
+            trace["retrieval_mode"] = "hybrid_recipe_kg"
+            trace["retrieval_pipeline"] = "alias + char_ngram_tfidf + gte-large-zh + rrf + knowledge_graph"
+            trace["retrieval_top_k"] = len(hybrid_retrieval.get("candidates") or [])
         trace["retrieved_chunks"].append(
             {
                 "filename": "recipe_query_tool",

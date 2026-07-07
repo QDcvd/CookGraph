@@ -23,6 +23,7 @@ from backend.context_manager import (
     history_context_summary,
     recent_context_paths,
 )
+from backend.token_usage_tracker import TokenUsageTracker
 from backend.tool_calling import (
     _append_tool_result_to_trace,
     _execute_tool_call,
@@ -175,9 +176,12 @@ def _build_tool_loop_system_prompt(tools: list[Any]) -> str:
         "- 运行时已经把上面的工具作为结构化 tools schema 传给模型；需要工具时必须发起正式 tool_call，不要在文字里假装调用。\n"
         "- 当前使用 /no_think 模式，请不要输出隐藏推理过程，把 token 留给工具调用和最终答案。\n"
         "- 如果用户明确点名某个工具，就调用该工具。\n"
-        "- 如果用户询问菜谱、菜品做法、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，或问“哪些菜用了某食材/技法”，优先调用 recipe_query_tool；不要先调用 web_search_tool。\n"
+        "- 工具名必须使用精确注册名：recipe_query_tool 或 web_search_tool；不要输出 recipe_query、recipe、search 等不存在的别名。\n"
+        "- 如果用户的输入像是在询问某道菜、某个菜式、想吃某道菜，或询问菜谱、菜品做法、怎么做、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，或问“哪些菜用了某食材/技法”，必须先调用 recipe_query_tool；不要直接凭常识回答，也不要先调用 web_search_tool。\n"
+        "- 如果用户只是打招呼、问天气、问模型身份，或其他明显非菜谱问题，不要调用 recipe_query_tool。\n"
+        "- 例如“辣椒炒肉怎么做”“我想吃清蒸鲈鱼”“西红柿炒鸡蛋的配料”“小炒黄牛肉火候怎么控制”都必须调用 recipe_query_tool。\n"
         "- recipe_query_tool 返回的是本地菜谱知识图谱结果；最终回答必须优先依据该工具结果。如果工具未找到，再说明本地图谱未命中，不要编造做法。\n"
-        "- 当 recipe_query_tool 未命中时，系统可能自动补充 web_search_tool；最终回答要区分“本地图谱结果”和“联网补充资料”。\n"
+        "- 当 recipe_query_tool 返回 web_fallback_allowed: True 且本地图谱未命中时，系统可能自动补充 web_search_tool；最终回答要区分“本地图谱结果”和“联网补充资料”。\n"
         "- 只有当用户明确要求网页搜索、网络搜索、联网查询、在线查找、最新信息，或本地菜谱知识图谱未命中且需要公共网页补充时，才调用 web_search_tool。\n"
         "- find_tool 和 read_file_tool 当前未注册，不能调用；如果用户要求查找或读取本地文件，请说明当前暂未启用本地文件工具。\n"
         "- 工具返回结果后，必须以最新工具结果作为最高优先级证据；如果它与历史回答或你的先验冲突，明确纠正旧说法，再给最终答案。\n"
@@ -193,10 +197,14 @@ def _recipe_query_needs_web_fallback(content: str) -> bool:
     text = str(content or "")
     if not text.strip():
         return True
+    if "web_fallback_allowed: False" in text:
+        return False
+    if "web_fallback_allowed: True" in text and "success: False" in text:
+        return True
     if "为您找到相似" in text:
         return False
     if "success: False" in text:
-        return True
+        return False
     miss_markers = [
         "未找到菜品",
         "未找到使用",
@@ -224,13 +232,60 @@ async def _execute_web_fallback_after_recipe(
     return executed_name, executed_args, content
 
 
-async def _emit_final_answer_from_tool_context(user_text: str, trace: dict, tool_context: list[dict]):
+async def _execute_forced_tool_call(
+    user_text: str,
+    messages: list[Any],
+    trace: dict,
+    tool_context: list[dict],
+    tool_name: str,
+    args: dict,
+    call_id: str,
+) -> int:
+    """Execute a tool call forced by deterministic routing. Returns call count."""
+    call = {"name": tool_name, "args": args, "id": call_id}
+    messages.append(AIMessage(content="", tool_calls=[call]))
+    executed_name, executed_args, content = await _execute_tool_call(call)
+    _append_tool_result_to_trace(trace, executed_name, executed_args, content)
+    tool_context.append({"tool_name": executed_name, "args": executed_args, "content": content})
+    messages.append(ToolMessage(content=content, tool_call_id=call_id, name=executed_name))
+
+    calls_used = 1
+    if executed_name == "recipe_query_tool" and _recipe_query_needs_web_fallback(content):
+        web_name, web_args, web_content = await _execute_web_fallback_after_recipe(
+            user_text,
+            messages,
+            trace,
+            f"{call_id}_web_fallback",
+        )
+        tool_context.append({"tool_name": web_name, "args": web_args, "content": web_content})
+        calls_used += 1
+    return calls_used
+
+
+async def _emit_final_answer_from_tool_context(
+    user_text: str,
+    trace: dict,
+    tool_context: list[dict],
+    runtime_memory: str = "",
+    token_tracker: TokenUsageTracker | None = None,
+):
     """工具执行完成后，用不绑定 tools 的普通模型整理最终回答。"""
     yield {"type": "trace", "rag_trace": trace}
     yield {"type": "rag_step", "step": {"label": "正在整理最终回答...", "icon": "✍️"}}
+    grounded_recipe_answer = _build_grounded_recipe_answer(user_text, tool_context)
+    if grounded_recipe_answer:
+        yield {"type": "content", "content": grounded_recipe_answer}
+        if token_tracker is not None:
+            trace["token_usage"] = token_tracker.snapshot(final=True)
+            yield {"type": "token_usage", "token_usage": trace["token_usage"]}
+        return
+
     try:
         async with asyncio.timeout(FINAL_ANSWER_TIMEOUT_SECONDS):
-            async for event in _stream_model_answer(_build_final_prompt(user_text, trace, tool_context)):
+            async for event in _stream_model_answer(
+                _build_final_prompt(user_text, trace, tool_context, runtime_memory),
+                token_tracker=token_tracker,
+            ):
                 yield event
     except asyncio.TimeoutError:
         reason = f"最终回答生成超时：超过 {FINAL_ANSWER_TIMEOUT_SECONDS}s；我先基于工具结果给出摘要。"
@@ -380,7 +435,7 @@ def _build_missing_tool_router_prompt(user_text: str, history: list[dict]) -> li
         "1. 如果用户询问菜谱、菜品做法、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，选择 recipe_query_tool。\n"
         "2. 如果用户明确需要外部、在线、最新或公共网页信息，选择 web_search_tool。\n"
         "3. 如果用户要查找本地路径、读取文件、查看项目或 README，返回 null，因为本地文件工具当前未注册。\n"
-        "4. 如果用户只是普通聊天、写作或基于已有上下文已经能回答，返回 null。\n"
+        "4. 如果用户只是普通聊天、打招呼、问天气、问模型身份、写作或基于已有上下文已经能回答，返回 null。\n"
         "5. 参数必须尽量具体，不要用空对象敷衍。"
     )
     return [SystemMessage(content=system), HumanMessage(content=_with_no_think(user))]
@@ -458,6 +513,128 @@ def _build_partial_tool_answer(user_text: str, trace: dict, stop_reason: str | N
     lines.append("")
     lines.append(_build_tool_fallback_next_step(trace, useful_chunks))
     return "\n".join(lines)
+
+
+def _build_grounded_recipe_answer(user_text: str, tool_context: list[dict]) -> str:
+    """Return a deterministic answer when recipe_query_tool has enough structured evidence.
+
+    This prevents the final LLM pass from adding common-cooking details that were not
+    present in the local recipe graph, such as changing exact times or inventing
+    seasonings.
+    """
+    recipe_item = None
+    for item in reversed(tool_context):
+        if item.get("tool_name") == "recipe_query_tool":
+            content = str(item.get("content") or "")
+            if "success: True" in content and "cooking_method_desc:" in content:
+                recipe_item = item
+                break
+    if recipe_item is None:
+        return ""
+
+    content = str(recipe_item.get("content") or "")
+    dish = _extract_recipe_dish_name(content) or _extract_query_dish_name(user_text) or "这道菜"
+    method = _extract_recipe_field(content, "cooking_method_desc")
+    tips = _extract_recipe_field(content, "cooking_tips")
+    fire = _extract_recipe_field(content, "fire_control_process")
+    ingredients = _extract_bullet_section(content, "主要食材")
+    sides = _extract_bullet_section(content, "配料")
+    seasonings = _extract_bullet_section(content, "调味品")
+
+    if not method:
+        return ""
+
+    lines = [f"根据本地菜谱图谱，{dish}可以这样做：", ""]
+
+    if ingredients or sides or seasonings:
+        lines.append("用料：")
+        for label, values in (("主要食材", ingredients), ("配料", sides), ("调味品", seasonings)):
+            if values:
+                lines.append(f"- {label}：" + "、".join(values))
+        lines.append("")
+
+    steps = _split_numbered_recipe_steps(method)
+    lines.append("做法：")
+    if steps:
+        for index, step in enumerate(steps, start=1):
+            lines.append(f"{index}. {step}")
+    else:
+        lines.append(method)
+
+    fire_points = _split_semicolon_items(fire)
+    if fire_points:
+        lines.append("")
+        lines.append("火力和时间：")
+        for item in fire_points[:6]:
+            lines.append(f"- {item}")
+
+    if tips:
+        lines.append("")
+        lines.append(f"要点：{tips}")
+
+    lines.append("")
+    lines.append("以上内容来自本地菜谱知识图谱。")
+    return "\n".join(lines)
+
+
+def _extract_recipe_dish_name(content: str) -> str:
+    match = re.search(r"【([^】\n]+?)\s+完整档案】", content)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"为您找到相似菜品[：:][\"“]?([^\"”\n]+)", content)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _extract_query_dish_name(user_text: str) -> str:
+    text = str(user_text or "").strip()
+    text = re.sub(r"^(我想吃|想吃|我要吃|帮我做|请问)", "", text)
+    text = re.sub(r"(怎么做|的做法|做法|蒸多久|火候.*|配料.*)$", "", text)
+    return text.strip(" ？?。！!")
+
+
+def _extract_recipe_field(content: str, field: str) -> str:
+    pattern = rf"(?m)^{re.escape(field)}:\s*(.*)$"
+    match = re.search(pattern, content)
+    return match.group(1).strip() if match else ""
+
+
+def _extract_bullet_section(content: str, heading: str) -> list[str]:
+    pattern = rf"{re.escape(heading)}：\s*\n(?P<body>(?:\s*• .+\n?)+)"
+    match = re.search(pattern, content)
+    if not match:
+        return []
+    values = []
+    for line in match.group("body").splitlines():
+        line = line.strip()
+        if line.startswith("•"):
+            value = line.lstrip("•").strip()
+            if value:
+                values.append(value)
+    return values
+
+
+def _split_numbered_recipe_steps(method: str) -> list[str]:
+    text = str(method or "").strip()
+    if not text:
+        return []
+    matches = list(re.finditer(r"(?:^|；|;)\s*(\d+)[.．、]\s*", text))
+    if not matches:
+        return [item for item in _split_semicolon_items(text) if item]
+
+    steps: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        step = text[start:end].strip("；; ，,")
+        if step:
+            steps.append(step)
+    return steps
+
+
+def _split_semicolon_items(text: str) -> list[str]:
+    return [item.strip(" ；;") for item in re.split(r"[；;]\s*", str(text or "")) if item.strip(" ；;")]
 
 
 def _build_tool_fallback_conclusion(
@@ -559,12 +736,14 @@ def _build_tool_loop_messages(user_text: str, history: list[dict]) -> list[Any]:
             messages.append(ToolMessage(content=str(content or ""), tool_call_id=tool_call_id, name=tool_name))
         elif role == "context":
             messages.append(("user", f"<历史工具上下文>\n{content}\n</历史工具上下文>"))
+        elif role == "runtime_memory":
+            messages.append(("user", str(content or "")))
     messages.append(("user", _with_no_think(user_text)))
     return messages
 
 
 
-def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict]) -> list[Any]:
+def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict], runtime_memory: str = "") -> list[Any]:
     context_lines = []
     for index, item in enumerate(tool_context, start=1):
         context_lines.append(
@@ -575,30 +754,45 @@ def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict]) -
     system = (
         "你是迷你烹饪问答机器人，一个简洁的中文助手。请只输出给用户看的最终回答。"
         "不要复述内部搜索步骤、工具调用过程、失败模式或原始日志。"
-        "如果找到了菜谱图谱或网页信息，请总结有用结果，并在必要时说明信息来自本地图谱还是联网资料。"
+        "如果找到了菜谱图谱或网页信息，只能根据已收集的工具上下文回答。"
+        "不得新增工具上下文中没有出现的步骤、食材、调料、用量、时间、火力档位或温度。"
+        "不得把工具给出的精确时间改写成更宽泛的范围；例如工具写8分钟，就不要写8-10分钟。"
+        "如果工具上下文给出了 cooking_method_desc、fire_control_process、配料或调味品，必须优先保留这些字段里的事实。"
         "如果最新工具上下文与历史回答或先验冲突，必须以最新工具上下文为准并明确纠正旧说法。"
         "如果上下文不足，请简短说明还缺少什么。"
     )
     user = (
         f"用户问题：\n{user_text}\n\n"
+        f"运行时记忆：\n{runtime_memory or '无'}\n\n"
         f"已收集的工具上下文：\n{context}\n\n"
         f"检索摘要：\n"
         f"- 已用工具：{[call.get('tool_name') for call in trace.get('tool_calls', [])]}\n"
-        "请用中文写出干净、直接的最终回答。"
+        "请用中文写出干净、直接的最终回答。回答前自检：每一个步骤、时间、用量、调料都必须能在工具上下文中找到依据。"
     )
     return [SystemMessage(content=system), HumanMessage(content=_with_no_think(user))]
+
+
+def _runtime_memory_from_history(history: list[dict]) -> str:
+    parts = [
+        str(item.get("content") or "").strip()
+        for item in history
+        if item.get("role") == "runtime_memory" and str(item.get("content") or "").strip()
+    ]
+    return "\n\n".join(parts)
 
 
 def _build_route_prompt(user_text: str) -> list[Any]:
     return [
         SystemMessage(
             content=(
-                "你是请求路由器，只能输出一个中文词：工具 或 直接回答。\n"
-                "可用工具名单：recipe_query_tool, web_search_tool。\n"
-                "输出 工具：用户要求菜谱知识图谱查询、菜品做法、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系、联网搜索、网络搜索、搜索一下、最新信息，或明确提到已注册工具名。\n"
-                "输出 直接回答：普通闲聊、身份问题、解释概念、写作润色、本地文件查找/读取请求，且不需要已注册工具。\n"
-                "示例：西红柿炒鸡蛋怎么做 => 工具\n"
-                "示例：网络搜索粤菜清蒸鱼做法 => 工具\n"
+        "你是请求路由器，只能输出一个中文词：工具 或 直接回答。\n"
+        "可用工具名单：recipe_query_tool, web_search_tool。\n"
+        "输出 工具：用户要求菜谱知识图谱查询、菜品做法、怎么做、想吃某道菜、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系、联网搜索、网络搜索、搜索一下、最新信息，或明确提到已注册工具名。\n"
+        "输出 直接回答：普通闲聊、身份问题、解释概念、写作润色、本地文件查找/读取请求，且不需要已注册工具。菜谱怎么做不是直接回答。\n"
+        "示例：西红柿炒鸡蛋怎么做 => 工具\n"
+        "示例：告诉我，凉拌牛肉怎么做 => 工具\n"
+        "示例：我想吃清蒸鲈鱼 => 工具\n"
+        "示例：网络搜索粤菜清蒸鱼做法 => 工具\n"
                 "示例：查找 README => 直接回答\n"
                 "示例：你是什么模型 => 直接回答\n"
                 "不要解释，不要输出标点。"
@@ -623,6 +817,12 @@ def _looks_like_tool_request(user_text: str) -> bool:
         "网络搜索",
         "网页搜索",
         "最新",
+        "怎么做",
+        "如何做",
+        "咋做",
+        "怎样做",
+        "想吃",
+        "我要吃",
         "菜谱",
         "菜品",
         "做法",
@@ -663,9 +863,14 @@ def _build_direct_chat_prompt(user_text: str, history: list[dict]) -> list[Any]:
             content=(
                 "你是迷你烹饪问答机器人，一个简洁的中文助手。请直接回答用户。"
                 "不要提及工具调用、内部分析或隐藏推理。"
+                "如果用户在问某道菜怎么做、想吃某道菜、菜谱、配料、火候、烹饪步骤或食材做法，"
+                "你不能凭常识编菜谱；只能回复：这个问题需要调用菜谱工具，请重新发送或稍后再试。"
             )
         )
     ]
+    for msg in history:
+        if msg.get("role") == "runtime_memory" and msg.get("content"):
+            messages.append(("user", str(msg.get("content"))))
     for msg in history[-6:]:
         role = msg.get("role")
         content = msg.get("content", "")
@@ -677,7 +882,11 @@ def _build_direct_chat_prompt(user_text: str, history: list[dict]) -> list[Any]:
     return messages
 
 
-async def _stream_model_answer(messages: list[Any]):
+def _token_usage_event(token_tracker: TokenUsageTracker, *, final: bool = False) -> dict:
+    return {"type": "token_usage", "token_usage": token_tracker.snapshot(final=final)}
+
+
+async def _stream_model_answer(messages: list[Any], token_tracker: TokenUsageTracker | None = None):
     raw_output = ""
     _debug_log(f"即将开始流式请求大模型，消息数量={len(messages)}")
     async for chunk in get_model().astream(messages):
@@ -685,14 +894,20 @@ async def _stream_model_answer(messages: list[Any]):
         if not isinstance(chunk, AIMessageChunk):
             continue
 
-        raw_output += _message_reasoning_to_text(chunk)
-        raw_output += _message_content_to_text(chunk.content)
+        chunk_text = _message_reasoning_to_text(chunk) + _message_content_to_text(chunk.content)
+        raw_output += chunk_text
+        if token_tracker is not None:
+            token_tracker.add_generated_text(chunk_text)
+            token_tracker.add_model_usage(chunk)
+            yield _token_usage_event(token_tracker)
 
     thinking, answer = _split_local_llm_output(raw_output)
     if thinking:
         yield {"type": "thinking", "content": thinking}
     if answer:
         yield {"type": "content", "content": answer}
+    if token_tracker is not None:
+        yield _token_usage_event(token_tracker, final=True)
 
 
 async def stream_search_agent(user_text: str, history: list[dict]):
@@ -715,6 +930,8 @@ async def stream_search_agent(user_text: str, history: list[dict]):
         "max_consecutive_tool_calls": MAX_CONSECUTIVE_TOOL_CALLS,
     }
     messages = _build_tool_loop_messages(user_text, history)
+    token_tracker = TokenUsageTracker()
+    runtime_memory = _runtime_memory_from_history(history)
     model = get_tool_bound_model()
     tool_context: list[dict] = []
     continue_nudges = 0
@@ -738,9 +955,15 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                 _debug_log(f"即将请求工具循环模型，第{turn_index + 1}轮，消息数量={len(messages)}")
                 response = await model.ainvoke(messages)
                 _debug_dump_model_return(f"工具循环模型返回-第{turn_index + 1}轮", response)
+                token_tracker.add_model_usage(response)
+                trace["token_usage"] = token_tracker.snapshot()
+                yield _token_usage_event(token_tracker)
                 if not isinstance(response, AIMessage):
                     raw_answer = _message_content_to_text(getattr(response, "content", ""))
+                    token_tracker.add_generated_text(raw_answer)
+                    trace["token_usage"] = token_tracker.snapshot(final=True)
                     yield {"type": "trace", "rag_trace": trace}
+                    yield _token_usage_event(token_tracker, final=True)
                     if raw_answer:
                         yield {"type": "content", "content": raw_answer}
                     return
@@ -801,13 +1024,44 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                         "detail": web_content[:180],
                                     },
                                 }
-                        async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context):
+                        async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory, token_tracker):
+                            if event.get("type") == "token_usage":
+                                trace["token_usage"] = event.get("token_usage")
                             yield event
                         return
 
                     thinking, answer = _split_local_llm_output(raw_output)
                     if answer:
+                        if _looks_like_tool_request(user_text):
+                            forced_call = await _route_missing_tool_call(user_text, history)
+                            if forced_call is None:
+                                forced_call = {"name": "recipe_query_tool", "args": {"query": user_text}}
+                            yield {
+                                "type": "rag_step",
+                                "step": {
+                                    "label": f"模型未调用工具，已强制调用：{_tool_call_name(forced_call)}",
+                                    "icon": "🧭",
+                                    "detail": str(_tool_call_args(forced_call)),
+                                },
+                            }
+                            total_tool_calls += await _execute_forced_tool_call(
+                                user_text,
+                                messages,
+                                trace,
+                                tool_context,
+                                _tool_call_name(forced_call),
+                                _tool_call_args(forced_call),
+                                f"forced_missing_tool_{turn_index}",
+                            )
+                            async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory, token_tracker):
+                                if event.get("type") == "token_usage":
+                                    trace["token_usage"] = event.get("token_usage")
+                                yield event
+                            return
+                        token_tracker.add_generated_text(raw_output)
+                        trace["token_usage"] = token_tracker.snapshot(final=True)
                         yield {"type": "trace", "rag_trace": trace}
+                        yield _token_usage_event(token_tracker, final=True)
                         if thinking:
                             yield {"type": "thinking", "content": thinking}
                         yield {"type": "content", "content": answer}
@@ -820,7 +1074,9 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                         continue
 
                     reason = "模型没有继续调用工具，也没有生成最终回答；我先返回目前掌握的信息。"
+                    trace["token_usage"] = token_tracker.snapshot(final=True)
                     yield {"type": "trace", "rag_trace": trace}
+                    yield _token_usage_event(token_tracker, final=True)
                     yield {"type": "content", "content": _build_partial_tool_answer(user_text, trace, reason)}
                     return
 
@@ -839,7 +1095,9 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                 "detail": reason,
                             },
                         }
+                        trace["token_usage"] = token_tracker.snapshot(final=True)
                         yield {"type": "trace", "rag_trace": trace}
+                        yield _token_usage_event(token_tracker, final=True)
                         yield {"type": "content", "content": _build_partial_tool_answer(user_text, trace, reason)}
                         return
 
@@ -859,7 +1117,9 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                 "detail": reason,
                             },
                         }
+                        trace["token_usage"] = token_tracker.snapshot(final=True)
                         yield {"type": "trace", "rag_trace": trace}
+                        yield _token_usage_event(token_tracker, final=True)
                         yield {"type": "content", "content": _build_partial_tool_answer(user_text, trace, reason)}
                         return
 
@@ -920,7 +1180,9 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                 "detail": reason,
                             },
                         }
+                        trace["token_usage"] = token_tracker.snapshot(final=True)
                         yield {"type": "trace", "rag_trace": trace}
+                        yield _token_usage_event(token_tracker, final=True)
                         yield {"type": "content", "content": _build_partial_tool_answer(user_text, trace, reason)}
                         return
 
@@ -934,22 +1196,30 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                 "detail": reason,
                             },
                         }
+                        trace["token_usage"] = token_tracker.snapshot(final=True)
                         yield {"type": "trace", "rag_trace": trace}
+                        yield _token_usage_event(token_tracker, final=True)
                         yield {"type": "content", "content": _build_partial_tool_answer(user_text, trace, reason)}
                         return
 
                 if tool_context:
-                    async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context):
+                    async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory, token_tracker):
+                        if event.get("type") == "token_usage":
+                            trace["token_usage"] = event.get("token_usage")
                         yield event
                     return
 
+            trace["token_usage"] = token_tracker.snapshot(final=True)
             yield {"type": "trace", "rag_trace": trace}
+            yield _token_usage_event(token_tracker, final=True)
             yield {"type": "content", "content": _build_partial_tool_answer(user_text, trace)}
     except asyncio.TimeoutError:
+        trace["token_usage"] = token_tracker.snapshot(final=True)
         yield {"type": "error", "content": f"工具循环超时：超过 {AGENT_TIMEOUT_SECONDS}s，已停止本轮执行"}
         yield {"type": "trace", "rag_trace": trace}
     except asyncio.CancelledError:
         raise
     except Exception as e:
+        trace["token_usage"] = token_tracker.snapshot(final=True)
         yield {"type": "error", "content": f"工具循环出错: {str(e)}"}
         yield {"type": "trace", "rag_trace": trace}

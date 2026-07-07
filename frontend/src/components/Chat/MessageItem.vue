@@ -33,6 +33,7 @@
             :msg-index="msgIndex" 
             @cite-click="onCiteClick"
           />
+          <TokenUsageBadge :usage="msg.tokenUsage" />
         </section>
 
         <References 
@@ -52,6 +53,7 @@ import MessageContent from './MessageContent.vue';
 import ThinkingTrace from './ThinkingTrace.vue';
 import References from './References.vue';
 import RetrievalTraceDetails from './RetrievalTraceDetails.vue';
+import TokenUsageBadge from './TokenUsageBadge.vue';
 import type { Message } from '@/types/chat';
 
 const props = defineProps<{
