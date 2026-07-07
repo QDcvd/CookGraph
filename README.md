@@ -1,6 +1,6 @@
 # MiniCookingAgent-Demo — 迷你烹饪问答机器人
 
-这是一个迷你烹饪问答机器人项目，基于 FastAPI + Vue + 本地模型工具循环实现，面向菜谱、食材、菜单文件等中文问答场景。
+这是一个迷你烹饪问答机器人项目，基于 FastAPI + Vue + OpenAI 兼容本地/远端模型工具循环实现，面向菜谱、食材和烹饪技法等中文问答场景。
 
 ## 能做什么
 
@@ -56,13 +56,62 @@ miniCookingAgent-Demo/
 └── start.py
 ```
 
-## 快速启动
+## 新机器部署
 
-推荐在 Git Bash 或 Anaconda Prompt 中运行：
+推荐使用 uv 部署脚本。它会安装后端依赖、前端依赖，并默认下载 `gte-large-zh` embedding 模型到 `models/gte-large-zh`：
 
 ```bash
-cd /g/miniCookingAgent-Demo
-python start.py
+bash deploy_uv.sh
+```
+
+常用选项：
+
+```bash
+# 跳过模型下载
+bash deploy_uv.sh --skip-model
+
+# 跳过前端依赖，只安装后端依赖并下载 embedding 模型
+bash deploy_uv.sh --skip-frontend
+
+# 部署完成后直接启动
+bash deploy_uv.sh --start
+
+# 网络或 CI 环境下顺序安装，便于定位失败日志
+bash deploy_uv.sh --no-parallel
+```
+
+脚本默认使用国内镜像源：
+
+```ini
+UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+NPM_REGISTRY=https://registry.npmmirror.com
+MODEL_SOURCE=modelscope
+MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
+UV_CONCURRENT_DOWNLOADS=8
+UV_CONCURRENT_BUILDS=4
+```
+
+如果 HuggingFace 镜像报 `SSL: UNEXPECTED_EOF_WHILE_READING`，优先使用默认的 `MODEL_SOURCE=modelscope`。
+
+Windows 建议：
+
+- 推荐在 Git Bash 里运行 `bash deploy_uv.sh`。
+- 如果系统里的 `bash` 是 `C:\Windows\System32\bash.exe`，它会进入 WSL。不要用 WSL bash 混跑 Windows `.venv`。
+
+## 快速启动
+
+PowerShell：
+
+```powershell
+cd E:\miniCookingAgent-Demo
+.\.venv\Scripts\python.exe start.py
+```
+
+Git Bash：
+
+```bash
+cd /e/miniCookingAgent-Demo
+.venv/Scripts/python.exe start.py
 ```
 
 默认会启动：
@@ -74,77 +123,22 @@ python start.py
 调试大模型返回值：
 
 ```bash
-python start.py --debug-llm
+.venv/Scripts/python.exe start.py --debug-llm
 ```
 
 禁用远端 LM Studio SSH 隧道：
 
 ```bash
-python start.py --no-llm-tunnel
+.venv/Scripts/python.exe start.py --no-llm-tunnel
 ```
 
 手动指定适配器：
 
 ```bash
-python start.py --adapter agent_adapter_local_LLM_harness
-python start.py --adapter agent_adapter_local_LLM
-python start.py --adapter agent_adapter
+.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM_harness
+.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM
+.venv/Scripts/python.exe start.py --adapter agent_adapter
 ```
-
-## uv 一键部署
-
-推荐在 Git Bash 中运行：
-
-```bash
-bash deploy_uv.sh
-```
-
-常用选项：
-
-```bash
-# 默认会安装前后端依赖，并下载 embedding 模型
-bash deploy_uv.sh
-
-# 跳过模型下载
-bash deploy_uv.sh --skip-model
-
-# 跳过前端依赖，只安装后端依赖并下载 embedding 模型
-bash deploy_uv.sh --skip-frontend
-
-# 部署完成后直接启动
-bash deploy_uv.sh --start
-```
-
-脚本默认会把 `gte-large-zh` embedding 模型下载到 `models/gte-large-zh`。如不需要模型，使用 `--skip-model`。脚本默认使用 ModelScope，国内网络更稳：
-
-```bash
-MODEL_SOURCE=modelscope bash deploy_uv.sh
-```
-
-如需切回 HuggingFace 或 HuggingFace 镜像：
-
-```bash
-MODEL_SOURCE=huggingface HF_ENDPOINT=https://hf-mirror.com bash deploy_uv.sh
-```
-
-可覆盖变量：
-
-```ini
-UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
-NPM_REGISTRY=https://registry.npmmirror.com
-MODEL_SOURCE=modelscope
-MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
-MODEL_REPO=thenlper/gte-large-zh
-MODEL_DIR=./models/gte-large-zh
-HF_ENDPOINT=https://hf-mirror.com
-UV_CONCURRENT_DOWNLOADS=8
-UV_CONCURRENT_BUILDS=4
-```
-
-Windows 注意事项：
-
-- 如果系统里的 `bash` 是 `C:\Windows\System32\bash.exe`，它会进入 WSL。不要用 WSL bash 混跑已有 Windows `.venv`，容易出现 WSL 里找不到 `uv/pip` 或创建 Linux venv 的问题。
-- 推荐安装 Git Bash 后运行 `bash deploy_uv.sh ...`。
 
 ## Docker 依赖环境
 
@@ -181,6 +175,8 @@ docker run --rm -it \
 python start.py --adapter agent_adapter_local_LLM_harness
 ```
 
+Docker 镜像不内置 embedding 模型。需要语义召回时，先在宿主机运行 `bash deploy_uv.sh` 下载模型，或把已有模型目录挂载到 `/workspace/models/gte-large-zh`。
+
 ## 本地模型配置
 
 `.env` 里已经按本地模型模式配置：
@@ -214,9 +210,8 @@ LLM_SSH_TUNNEL=0
 
 后端：
 
-```bash
-conda activate minicook
-uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 前端：
@@ -272,7 +267,7 @@ python -m compileall backend start.py
 
 | 测试类型 | 运行命令 | 用例数 | 覆盖 |
 | ------- | ------- | ----- | ---- |
-| 单轮召回率 | `python test/run_recall_test.py --all` | 100 条 | 正向/反向/模糊/边界 + 联网兜底 |
+| 单轮召回率 | `python test/run_recall_test.py --phase all` | 100 条 | 正向/反向/模糊/边界 + 联网兜底 |
 | 多轮对话 | `python test/run_multiturn_dialogue_test.py --all` | 9 个 case | 记忆/抗干扰/逻辑自洽 + DeepSeek LLM 裁判 |
 | 持久化 | `python test/test_chat_persistence.py` | 6 项 | SQLite round-trip / hydrate / archive |
 
