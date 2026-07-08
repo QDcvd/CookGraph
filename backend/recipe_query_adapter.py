@@ -14,16 +14,24 @@ import re
 from pathlib import Path
 from typing import Any
 
+from backend.query_understanding import (
+    QueryIntent,
+    classify_intent,
+    format_ambiguous_query,
+    format_non_recipe,
+)
 from backend.recipe_semantic_retriever import RecipeSemanticMatch, semantic_match_recipe
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = Path(__file__).resolve().parent / "4-V1菜谱查询recipe_query-查询火力.py"
 DEFAULT_RECIPE_KG_PATH = PROJECT_ROOT / "config" / "chem+recipe_kg_updated_fire.pkl"
 DEFAULT_ALIAS_PATH = PROJECT_ROOT / "config" / "recipe_aliases.json"
+DEFAULT_REVERSE_ENTITY_ALIAS_PATH = PROJECT_ROOT / "config" / "reverse_entity_aliases.json"
 
 _recipe_module = None
 _recipe_system = None
 _alias_groups_cache: list[set[str]] | None = None
+_reverse_entity_alias_cache: dict[str, dict[str, list[str]]] | None = None
 
 INGREDIENT_GROUPS: dict[str, list[str]] = {
     "牛肉": ["牛肉", "黄牛肉", "牛里脊", "牛里脊肉", "肥牛", "肥牛卷"],
@@ -316,6 +324,82 @@ def _format_intent_rejection(query: str, reason: str) -> str:
     )
 
 
+def _looks_like_graph_dish_count_query(query: str) -> bool:
+    """Whether the user asks for the number of dishes in the local KG."""
+    text = _normalize_query_text(query)
+    if not text:
+        return False
+    count_markers = ["多少", "几道", "几种", "数量", "总数", "一共", "共"]
+    graph_markers = ["收录", "图谱", "知识库", "菜谱库", "本地", "当前", "你现在"]
+    dish_markers = ["菜", "菜品", "菜谱", "道菜"]
+    return (
+        any(marker in text for marker in count_markers)
+        and any(marker in text for marker in dish_markers)
+        and any(marker in text for marker in graph_markers)
+    )
+
+
+def _format_graph_dish_count(system: Any) -> str:
+    dish_names = sorted(_kg_dish_names(system))
+    count = len(dish_names)
+    return (
+        f"本地菜谱知识图谱当前收录 {count} 道菜。\n\n"
+        "结构化摘要：\n"
+        "success: True\n"
+        "query_type: graph_meta\n"
+        "match_mode: exact\n"
+        f"dish_count: {count}\n"
+        "web_fallback_allowed: False"
+    )
+
+
+def _format_forward_unknown_miss(query: str, reason: str, semantic_note: str | None = None) -> str:
+    """Stable result for a single-recipe miss that should trigger web fallback."""
+    output = (
+        "菜谱查询未命中：本地图谱未收录这道菜，建议进入联网搜索。\n"
+        f"原始问题：{query}\n"
+        f"未命中原因：{reason}\n\n"
+        "结构化摘要：\n"
+        "success: False\n"
+        "intent: forward_recipe_query\n"
+        "match_mode: none\n"
+        "web_fallback_allowed: True"
+    )
+    if semantic_note:
+        output += "\n\n语义召回摘要：\n" + semantic_note
+    return output
+
+
+def _excluded_food_terms(query: str) -> list[str]:
+    """Extract explicit user exclusions like 不要肥牛 / 不想用肥牛."""
+    text = _normalize_query_text(query)
+    terms: list[str] = []
+    patterns = [
+        r"(?:不要|不用|不想用|别用|不放|不加)(?P<term>[\u4e00-\u9fff]{1,8})",
+        r"(?P<term>[\u4e00-\u9fff]{1,8})(?:不要|不用|不想用|别用|不放|不加)",
+    ]
+    stop_words = (
+        "给我", "推荐", "三种", "适合", "分别", "做法", "步骤", "重复", "可以", "合并",
+        "的", "菜", "菜谱", "做", "炒",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            term = match.group("term").strip()
+            for stop in stop_words:
+                if stop in term:
+                    term = term.split(stop, 1)[0].strip()
+            if term and term not in terms:
+                terms.append(term)
+    return terms
+
+
+def _result_mentions_any(result: dict, terms: list[str]) -> bool:
+    if not terms:
+        return False
+    haystack = json.dumps(result, ensure_ascii=False)
+    return any(term and term in haystack for term in terms)
+
+
 def _kg_dish_names(system: Any) -> set[str]:
     """从现有图谱查询系统中读取标准菜名。"""
     executor = getattr(system, "executor", None)
@@ -389,6 +473,116 @@ def _node_names_by_label(system: Any, label: str) -> set[str]:
     }
 
 
+def _load_reverse_entity_aliases() -> dict[str, dict[str, list[str]]]:
+    global _reverse_entity_alias_cache
+    if _reverse_entity_alias_cache is not None:
+        return _reverse_entity_alias_cache
+    if DEFAULT_REVERSE_ENTITY_ALIAS_PATH.is_file():
+        try:
+            data = json.loads(DEFAULT_REVERSE_ENTITY_ALIAS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if isinstance(data, dict):
+            normalized: dict[str, dict[str, list[str]]] = {}
+            for kind, groups in data.items():
+                if not isinstance(groups, dict):
+                    continue
+                normalized[str(kind)] = {
+                    str(key): [str(item) for item in values if item]
+                    for key, values in groups.items()
+                    if isinstance(values, list)
+                }
+            _reverse_entity_alias_cache = normalized
+            return normalized
+    _reverse_entity_alias_cache = {}
+    return _reverse_entity_alias_cache
+
+
+def _entity_kind_label(kind: str) -> str:
+    spec = REVERSE_RELATION_SPECS.get(kind) or {}
+    return str(spec.get("label") or "")
+
+
+def _graph_node_aliases(system: Any, kind: str, value: str) -> list[str]:
+    label = _entity_kind_label(kind)
+    graph_names = _node_names_by_label(system, label)
+    if not graph_names:
+        return []
+
+    normalized_value = _normalize_reverse_value(value)
+    alias_config = _load_reverse_entity_aliases().get(kind, {})
+    for canonical, aliases in alias_config.items():
+        group = [canonical, *aliases]
+        normalized_group = {_normalize_reverse_value(item) for item in group}
+        if normalized_value not in normalized_group:
+            continue
+        filtered = [item for item in group if item in graph_names]
+        if filtered:
+            return list(dict.fromkeys(filtered))
+
+    if value in graph_names:
+        return [value]
+    matched = _match_graph_value(system, label, value)
+    return [matched] if matched else []
+
+
+def _dense_match_graph_value(system: Any, label: str, raw_value: str) -> tuple[str | None, str]:
+    names = sorted(_node_names_by_label(system, label))
+    query = _normalize_reverse_value(raw_value)
+    if not names or not query:
+        return None, ""
+    try:
+        import numpy as np
+        from backend.recipe_semantic_retriever import _load_model
+
+        model = _load_model()
+        embeddings = model.encode(
+            names,
+            batch_size=16,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        ).astype("float32")
+        query_embedding = model.encode(
+            [query],
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        ).astype("float32")[0]
+        scores = np.asarray(embeddings @ query_embedding, dtype="float32")
+    except Exception as e:
+        return None, f"dense_skip={type(e).__name__}: {e}"
+
+    order = np.argsort(-scores)
+    best_index = int(order[0])
+    second_score = float(scores[int(order[1])]) if len(order) > 1 else 0.0
+    best_name = names[best_index]
+    best_score = float(scores[best_index])
+    margin = best_score - second_score
+    debug = f"dense_node={best_name}:{best_score:.3f}; margin={margin:.3f}"
+    if best_score >= 0.72 and margin >= 0.08:
+        return best_name, debug
+    return None, debug
+
+
+def _resolve_reverse_entity(system: Any, kind: str, raw_value: str) -> tuple[list[str], str, str]:
+    label = _entity_kind_label(kind)
+    value = _normalize_reverse_value(raw_value)
+    if not label or not value:
+        return [], raw_value, "empty"
+
+    aliases = _graph_node_aliases(system, kind, value)
+    if aliases:
+        return aliases, aliases[0], "exact_or_alias"
+
+    matched = _match_graph_value(system, label, value)
+    if matched:
+        return [matched], matched, "lexical"
+
+    dense_match, dense_debug = _dense_match_graph_value(system, label, value)
+    if dense_match:
+        return [dense_match], dense_match, f"dense; {dense_debug}"
+    return [], raw_value, dense_debug or "not_found"
+
+
 def _normalize_reverse_value(value: str) -> str:
     text = _normalize_query_text(value)
     cleanup_patterns = [
@@ -408,7 +602,6 @@ def _normalize_reverse_value(value: str) -> str:
         "菜系",
         "推荐",
         "的",
-        "菜",
     ]
     for pattern in cleanup_patterns:
         text = text.replace(pattern, "")
@@ -553,6 +746,62 @@ def _query_reverse_relation_local(
         "web_fallback_allowed: False",
     ])
     return "\n".join(lines)
+
+
+def execute_reverse_query(system: Any, intent: QueryIntent) -> str:
+    kind = str(intent.target_type or "")
+    spec = REVERSE_RELATION_SPECS.get(kind)
+    raw_value = str(intent.target_text or intent.normalized_text or "").strip()
+    if not spec or not raw_value:
+        return (
+            "菜谱查询未执行：反向查询缺少明确的查询维度或实体。\n\n"
+            "结构化摘要：\n"
+            "success: False\n"
+            "intent: ambiguous\n"
+            "match_mode: none\n"
+            "web_fallback_allowed: False"
+        )
+
+    aliases, resolved_value, match_mode = _resolve_reverse_entity(system, kind, raw_value)
+    if not aliases:
+        return (
+            "菜谱查询未执行：未能在本地图谱节点中稳定匹配该反向查询对象。\n"
+            f"查询维度：{spec['display']}\n"
+            f"原始对象：{raw_value}\n"
+            f"匹配说明：{match_mode}\n\n"
+            "结构化摘要：\n"
+            "success: False\n"
+            "intent: ambiguous\n"
+            "match_mode: none\n"
+            "web_fallback_allowed: False"
+        )
+
+    supplemental: list[tuple[str, str, str]] = []
+    if kind == "technique":
+        raw_normalized = _normalize_reverse_value(raw_value)
+        resolved_normalized = _normalize_reverse_value(resolved_value)
+        if raw_normalized and raw_normalized != resolved_normalized:
+            ingredient_match = _match_graph_value(system, "Ingredient", raw_normalized)
+            seasoning_match = _match_graph_value(system, "Seasoning", raw_normalized)
+            if ingredient_match == raw_normalized:
+                aliases.append(ingredient_match)
+                supplemental.extend([
+                    ("USES_AUXILIARY", "Ingredient", "辅料"),
+                    ("USES_MAIN_INGREDIENT", "Ingredient", "食材"),
+                ])
+            if seasoning_match == raw_normalized:
+                aliases.append(seasoning_match)
+                supplemental.append(("USES_SEASONING", "Seasoning", "调味品"))
+
+    return _query_reverse_relation_local(
+        system,
+        relation=spec["relation"],
+        target_label=spec["label"],
+        display=spec["display"],
+        value=resolved_value,
+        aliases=list(dict.fromkeys(aliases)),
+        supplemental_relations=supplemental,
+    ) or ""
 
 
 def _query_deterministic_reverse_local(system: Any, query: str) -> str | None:
@@ -773,7 +1022,8 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
     if not text:
         return "菜谱查询失败：query 不能为空。"
 
-    if _looks_like_non_recipe_query(text):
+    is_graph_dish_count_query = _looks_like_graph_dish_count_query(text)
+    if _looks_like_non_recipe_query(text) and not is_graph_dish_count_query:
         return _format_intent_rejection(text, "当前问题不是单道菜谱查询。")
 
     # 检查 KG 文件
@@ -797,6 +1047,23 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
         return "菜谱查询失败：查询脚本尝试退出进程，请检查知识图谱路径或配置。"
     except Exception as e:
         return f"菜谱查询失败：{type(e).__name__}: {e}"
+
+    if is_graph_dish_count_query:
+        return _format_graph_dish_count(system)
+
+    # ── Query Understanding 层 ──
+    dish_names = _kg_dish_names(system)
+    intent = classify_intent(text, dish_names=dish_names, kg_system=system)
+    if intent.intent == "non_recipe_query":
+        return format_non_recipe(text)
+    if intent.intent == "ambiguous_query":
+        return format_ambiguous_query(intent)
+    if intent.intent == "reverse_query":
+        return execute_reverse_query(system, intent)
+    forward_unknown = intent.intent == "forward_unknown_recipe_query"
+    if intent.intent in ("forward_recipe_query", "forward_unknown_recipe_query", "legacy_forward_parser"):
+        # 继续走现有查询链路
+        pass
 
     deterministic_reverse_output = _query_deterministic_reverse_local(system, text)
     if deterministic_reverse_output:
@@ -824,6 +1091,19 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
 
     if not isinstance(result, dict):
         return f"菜谱查询失败：查询返回非字典类型: {type(result).__name__}"
+
+    if (
+        forward_unknown
+        and _result_is_success(result)
+        and str(result.get("match_mode") or "").lower() == "fuzzy"
+        and _result_mentions_any(result, _excluded_food_terms(text))
+        and not (semantic_match is not None and semantic_match.accepted and semantic_match.matched_text)
+    ):
+        return _format_forward_unknown_miss(
+            text,
+            "本地图谱只给出了包含用户明确排除食材的相似菜品，不能当作当前菜谱命中。",
+            semantic_note,
+        )
 
     if (
         semantic_match is not None

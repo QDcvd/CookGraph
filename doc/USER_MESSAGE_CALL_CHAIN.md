@@ -1,6 +1,6 @@
 # 用户发消息后的调用链
 
-本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、确定性菜谱路由、Agent 工具循环，到菜谱混合召回、知识图谱查询、联网兜底、最终回答约束、SSE 回传和 SQLite 落库的完整链路。
+本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、确定性菜谱路由、Agent 工具循环，到 Query Understanding、菜谱混合召回、知识图谱查询、联网兜底、最终回答约束、SSE 回传和 SQLite 落库的完整链路。
 
 ## 当前关键变化
 
@@ -8,12 +8,13 @@
 - 后端 `memory_store` 是运行期缓存，`data/memory.sqlite3` 是进程重启后的事实来源。
 - 用户消息写入后，会立即抽取长期偏好并写入 `preference_memory`。
 - 每轮请求都会构造 Zleap-lite runtime memory，注入长期偏好和当前 session 菜谱上下文。
-- `stream_search_agent()` 现在先跑 `_preflight_recipe_action()`，对一批高风险菜谱问题做确定性路由，再决定是否进入模型工具循环。
-- `recipe_query_tool` 仍是唯一菜谱工具；语义召回、别名、TF-IDF、dense embedding、RRF、知识图谱查询都藏在这个工具内部。
-- 反向食材查询如“牛肉可以做什么菜”由后端直接查本地图谱主食材关系，只列图谱明确命中的菜，不联网，不补常识。
+- `stream_search_agent()` 现在先跑 `_preflight_recipe_action()`，对无菜名属性追问、明确菜名覆盖旧上下文等高风险问题做确定性路由，再决定是否进入模型工具循环。
+- `recipe_query_tool` 仍是唯一菜谱工具；Query Understanding、反向结构化查询、菜名语义召回、别名、TF-IDF、dense embedding、RRF、知识图谱查询都藏在这个工具内部。
+- 反向查询如“牛肉怎么做”“花甲”“川菜”“香辣味”“蒸制”会先产出结构化 `QueryIntent(reverse_query)`，再直接查图谱节点和边，不进入旧自然语言 parser。
+- 反向查询的向量化对象是图谱节点名词（Ingredient/Technique/Taste/Cuisine 等），不是菜谱正文；低置信度或多类型歧义时追问用户。
 - 无明确菜名的属性追问如“火力要怎么控制”会先要求用户补充菜名，避免被历史上下文或模型常识带偏。
 - 本地图谱明确允许联网兜底且未命中时，工具循环自动补一次 `web_search_tool`。
-- 最终回答阶段先尝试确定性 grounded answer：反向查询、本地菜谱命中、联网兜底都有专门约束；只有无法确定性整理时才调用 content-only 模型。
+- 最终回答阶段先尝试确定性 grounded answer：反向查询、本地菜谱命中、联网兜底、歧义追问都有专门约束；只有无法确定性整理时才调用 content-only 模型。
 - assistant 最终回答和本轮 `rag_trace` 会一起持久化；随后根据 trace 更新当前 session 的 `recipe_context_json`。
 
 ## 0. 总流程图
@@ -228,13 +229,15 @@ flowchart TD
     E -->|否| E1["返回知识图谱文件不存在"]
     E -->|是| F["_get_recipe_system()<br/>加载或复用 RecipeQuerySystem"]
 
-    F --> G{"是否反向食材查询?<br/>X 可以做什么菜"}
-    G -->|是| H["_query_reverse_ingredient_local()<br/>只扫 USES_MAIN_INGREDIENT 边"]
-    H --> I["返回本地图谱明确命中列表<br/>web_fallback_allowed: False"]
-
-    F --> J{"是否普通反向查询?<br/>哪些菜用了某食材/技法"}
-    J -->|是| K["跳过菜名语义改写"]
-    J -->|否| L["semantic_match_recipe(query)"]
+    F --> G["classify_intent(query, dish_names, kg_system)<br/>Query Understanding"]
+    G --> H{"intent 类型"}
+    H -->|non_recipe| H1["format_non_recipe()<br/>说明不是菜谱查询"]
+    H -->|ambiguous| H2["format_ambiguous_query()<br/>要求用户补充实体类型"]
+    H -->|reverse_query| I["execute_reverse_query(system, intent)"]
+    I --> I1["按类型解析图谱节点<br/>exact / alias / lexical / dense node embedding"]
+    I1 --> I2["扫描图谱边<br/>只返回本地图谱明确命中的菜"]
+    I2 --> I3["web_fallback_allowed: False"]
+    H -->|forward_query / legacy| L["semantic_match_recipe(query)"]
 
     L --> M["读取 doc/菜谱.xlsx"]
     M --> N["构建召回文本<br/>菜名/别名/食材/调料/技法/口味/摘要"]
@@ -248,10 +251,9 @@ flowchart TD
     T --> U["RRF 融合候选"]
     U --> V{"score 和 margin 达标?"}
     V -->|是| W["得到标准菜名<br/>生成 effective_query"]
-    V -->|否| K
+    V -->|否| X
 
-    W --> X["RecipeQuerySystem.query(effective_query)"]
-    K --> X
+    W --> X["RecipeQuerySystem.query(effective_query 或原 query)"]
     X --> Y["QueryParser.parse()"]
     Y --> Z["QueryExecutor.execute()"]
     Z --> AA{"查询类型"}
@@ -501,15 +503,21 @@ web_search_tool
 ```text
 recipe_query_tool
   -> query_recipe_kg
-  -> 反向食材确定性查询
-  -> semantic_match_recipe
-     -> alias
-     -> char_ngram_tfidf
-     -> dense gte-large-zh
-     -> RRF fusion
-  -> RecipeQuerySystem.query
-  -> NetworkX 知识图谱精查
-  -> 空属性结果退回完整菜谱档案
+  -> Query Understanding
+     -> non_recipe: 直接说明不是菜谱查询
+     -> ambiguous: 要求用户补充实体类型
+     -> reverse_query: execute_reverse_query
+        -> 图谱节点名 exact / alias / lexical / dense embedding
+        -> NetworkX 边扫描，只列明确命中的菜
+     -> forward_query / legacy:
+        -> semantic_match_recipe
+           -> alias
+           -> char_ngram_tfidf
+           -> dense gte-large-zh
+           -> RRF fusion
+        -> RecipeQuerySystem.query
+        -> NetworkX 知识图谱精查
+        -> 空属性结果退回完整菜谱档案
 ```
 
 对于“辣椒炒肉怎么做”“我想吃清蒸鲈鱼”“小炒鸡具体做法”这类菜式问题，现在有两层保障：
@@ -517,7 +525,7 @@ recipe_query_tool
 1. preflight 识别明确菜名或裸菜式短语，直接强制 `recipe_query_tool`。
 2. 未命中 preflight 时，系统提示词仍要求模型必须先调用 `recipe_query_tool`。
 
-对于“牛肉可以用来做什么菜”这类反向食材查询，`query_recipe_kg()` 不让模型自由发挥，也不走联网搜索，而是扫描知识图谱中 `USES_MAIN_INGREDIENT` 边，只返回明确命中的菜。
+对于“牛肉可以用来做什么菜”“哪些菜用了蒜蓉这种做法”“有什么川菜推荐”“有哪些菜是蒸制的”这类反向查询，`query_recipe_kg()` 会先生成结构化 `QueryIntent(reverse_query)`，再根据实体类型查图谱节点和边。这里的向量化对象是图谱节点名词，不是菜谱正文；命中后只返回本地图谱明确关联的菜，不联网，不补常识。
 
 ## 6. 联网兜底
 
@@ -535,7 +543,7 @@ recipe_query_tool 返回结果
 边界：
 
 - 本地图谱明确给出相似菜品时，不联网。
-- 反向食材查询不联网，只列本地图谱明确命中的菜。
+- 反向查询不联网，只列本地图谱明确命中的菜。
 - 明显非菜谱问题，不因为历史上下文误触发菜谱工具。
 - 只有本地图谱未命中且允许公共网页补充，或者用户明确要求联网，才使用 `web_search_tool`。
 
@@ -594,17 +602,24 @@ ChatInput.vue
      -> 可能放行给模型工具循环
   -> recipe_query_tool(query)
      -> query_recipe_kg(query)
-     -> 反向食材本地图谱查询
-     -> semantic_match_recipe()
-        -> alias + TF-IDF + dense + RRF
-        -> SentenceTransformer(MINICOOK_EMBEDDING_MODEL_DIR 或 models/gte-large-zh)
-        -> backend/.cache/recipe_semantic_index.npz
-        -> 标准菜名 / effective_query
-     -> RecipeQuerySystem.query(effective_query)
-     -> QueryParser.parse()
-     -> QueryExecutor.execute()
-     -> human_readable + 结构化摘要 + hybrid retrieval 摘要
-     -> 必要时空属性结果退回完整档案
+     -> Query Understanding
+        -> non_recipe / ambiguous / reverse_query / forward_query
+     -> reverse_query:
+        -> execute_reverse_query()
+        -> 图谱节点名 exact / alias / lexical / dense embedding
+        -> NetworkX 边扫描
+        -> human_readable + 结构化摘要 + hybrid retrieval 摘要
+     -> forward_query / legacy:
+        -> semantic_match_recipe()
+           -> alias + TF-IDF + dense + RRF
+           -> SentenceTransformer(MINICOOK_EMBEDDING_MODEL_DIR 或 models/gte-large-zh)
+           -> backend/.cache/recipe_semantic_index.npz
+           -> 标准菜名 / effective_query
+        -> RecipeQuerySystem.query(effective_query)
+        -> QueryParser.parse()
+        -> QueryExecutor.execute()
+        -> human_readable + 结构化摘要 + hybrid retrieval 摘要
+        -> 必要时空属性结果退回完整档案
   -> 必要时 _execute_web_fallback_after_recipe()
      -> web_search_tool(user_text)
      -> DDGS().text()
@@ -636,11 +651,32 @@ stream_search_agent()
   -> 命中反向食材查询
   -> 强制 recipe_query_tool
   -> query_recipe_kg()
-  -> _query_reverse_ingredient_local()
-  -> 扫描 USES_MAIN_INGREDIENT 边
+  -> classify_intent() 得到 QueryIntent(reverse_query, entity_type=ingredient, entity=牛肉)
+  -> execute_reverse_query()
+  -> 解析图谱节点并扫描相关边
   -> 返回本地图谱明确命中的牛肉菜
   -> _build_grounded_reverse_answer()
   -> 最终回答只列本地图谱结果，不联网，不补常识
+```
+
+用户输入：
+
+```text
+有哪些菜是蒸制的
+```
+
+当前链路：
+
+```text
+stream_search_agent()
+  -> 模型工具循环或 preflight 触发 recipe_query_tool
+  -> query_recipe_kg()
+  -> classify_intent() 得到 QueryIntent(reverse_query, entity_type=technique, entity=蒸制)
+  -> execute_reverse_query()
+  -> 在 Technique/做法类图谱节点中做 exact / alias / lexical / dense 匹配
+  -> 返回图谱中明确关联“蒸制”的菜
+  -> _build_grounded_reverse_answer()
+  -> 不把未命中的菜或模型常识补进列表
 ```
 
 用户输入：

@@ -6,6 +6,8 @@
 
 - 直接回答烹饪、食材、菜谱、菜单相关问题。
 - 使用 `recipe_query_tool` 查询本地菜谱知识图谱（38814 个节点、15 万条关系），支持正向属性查询、反向关系查询、完整档案查询。
+- **Query Understanding**：反向查询先经过结构化意图识别，区分食材、技法、口味、菜系；不确定时追问，不靠模型硬猜。
+- **图谱节点名词召回**：反向查询的向量化对象是图谱节点名词（如 `牛肉`、`香辣味`、`川菜`、`蒸制`），不是菜谱正文。
 - 使用 `web_search_tool` 联网搜索公开网页资料（本地图谱未命中时自动兜底）。
 - 可自动通过 SSH 隧道连接远端 LM Studio 的 OpenAI 兼容 API。
 - **对话持久化**：后端重启后用同一个 `session_id` 恢复对话历史和菜谱上下文。
@@ -24,6 +26,7 @@ miniCookingAgent-Demo/
 │   ├── agent_tools.py                      # 工具定义（@tool 装饰器）
 │   ├── tool_calling.py                     # 工具调用解析/执行/trace
 │   ├── recipe_query_adapter.py             # 菜谱查询适配器
+│   ├── query_understanding.py              # 查询意图识别（正向/反向/歧义/非菜谱）
 │   ├── recipe_semantic_retriever.py        # 语义召回改写层
 │   ├── memory_store.py                     # 会话内存缓存 + SQLite 持久化
 │   ├── chat_persistence.py                 # SQLite 读写层（chat_sessions / chat_messages）
@@ -33,15 +36,17 @@ miniCookingAgent-Demo/
 ├── config/
 │   ├── chem+recipe_kg_updated_fire.pkl     # 菜谱知识图谱（约 16MB）
 │   ├── recepi/                             # 实体/关系/属性配置文件
-│   └── recipe_aliases.json                 # 菜名同义词典
+│   ├── recipe_aliases.json                 # 菜名同义词典
+│   └── reverse_entity_aliases.json         # 反向查询实体归并配置
 ├── frontend/
 │   ├── src/
 │   └── package.json
 ├── test/
-│   ├── recipe_test_data.py                   # 100 条单轮测试用例数据
+│   ├── recipe_test_data.py                   # 150 条单轮测试用例数据
 │   ├── run_recall_test.py                    # 召回率测试运行器（可联网兜底）
-│   ├── multiturn_test_data.py                # 9 个多轮对话测试 case
+│   ├── multiturn_test_data.py                # 20 个多轮对话测试 case
 │   ├── run_multiturn_dialogue_test.py        # 多轮对话测试运行器（真实 agent 链路）
+│   ├── test_query_understanding.py           # Query Understanding 单元测试
 │   ├── test_chat_persistence.py              # 对话持久化单元测试
 │   └── test_zleap_lite_memory.py             # Zleap-lite 记忆系统测试
 ├── doc/
@@ -181,6 +186,7 @@ sed -i 's/\r$//' start_docker.sh
 - 映射后端 `8000` 和前端 `5173`。
 - 启动 `python start.py --adapter agent_adapter_local_LLM_harness`。
 - 通过 `MINICOOK_EMBEDDING_MODEL_DIR` 使用镜像内置 embedding 模型。
+- 安装 `libgomp1`，供 `scikit-learn`/向量检索相关依赖在 slim 镜像内正常加载。
 
 常用选项：
 
@@ -258,6 +264,14 @@ npm run dev
 
 工具定义统一在 `backend/agent_tools.py` 中注册，`_get_tools()` 返回当前可用工具列表。新增工具时只需在 `agent_tools.py` 添加函数并用 `@tool` 装饰，然后在 `_get_tools()` 中返回即可，无需修改 harness 主循环。
 
+`recipe_query_tool` 内部先进入 `backend/query_understanding.py`：
+
+- 直接命中标准菜名或菜名别名时，继续走旧正向查询链路，保持高命中率。
+- 反向查询会产出结构化 `QueryIntent(reverse_query)`，再由 `execute_reverse_query()` 直接查图谱边，不进入旧自然语言 parser。
+- 短词如 `花甲`、`川菜`、`香辣味`、`蒸制` 会按图谱实体类型走反向查询。
+- `牛肉怎么做`、`虾怎么做` 这类“食材 + 怎么做”归为反向食材查询，先列本地图谱明确命中的菜。
+- `蒜蓉` 这类多类型歧义词会要求用户补充，不硬拆、不联网。
+
 为了保护远端模型服务，工具循环有三层限制：
 
 - `MAX_TOOL_TURNS`：最多模型工具回合数（默认 10）。
@@ -295,8 +309,9 @@ python -m compileall backend start.py
 
 | 测试类型 | 运行命令 | 用例数 | 覆盖 |
 | ------- | ------- | ----- | ---- |
-| 单轮召回率 | `python test/run_recall_test.py --phase all` | 100 条 | 正向/反向/模糊/边界 + 联网兜底 |
-| 多轮对话 | `python test/run_multiturn_dialogue_test.py --all` | 9 个 case | 记忆/抗干扰/逻辑自洽 + DeepSeek LLM 裁判 |
+| Query Understanding | `python -m unittest test.test_query_understanding` | 17 项 | 正向/反向/歧义/非菜谱意图分类 |
+| 单轮召回率 | `python test/run_recall_test.py --phase all` | 150 条 | 正向/反向/模糊/边界 + 联网兜底 |
+| 多轮对话 | `python test/run_multiturn_dialogue_test.py --all` | 20 个 case | 记忆/抗干扰/逻辑自洽 + DeepSeek LLM 裁判 |
 | 持久化 | `python test/test_chat_persistence.py` | 6 项 | SQLite round-trip / hydrate / archive |
 
 ### 多轮对话测试
@@ -321,10 +336,10 @@ python test/run_multiturn_dialogue_test.py --category contradiction
 # 第一阶段（核心 50 条）
 PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase 1
 
-# 第二阶段（扩展 50 条）
+# 第二阶段（扩展 100 条）
 PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase 2
 
-# 全量 100 条
+# 全量 150 条
 PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase all
 ```
 

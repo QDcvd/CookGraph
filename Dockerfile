@@ -41,6 +41,7 @@ RUN set -eux; \
       ca-certificates \
       curl \
       git \
+      libgomp1 \
       nodejs \
       npm \
       openssh-client; \

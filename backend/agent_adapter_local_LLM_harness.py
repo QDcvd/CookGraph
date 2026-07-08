@@ -258,6 +258,20 @@ def _looks_like_reverse_ingredient_question(user_text: str) -> bool:
     return False
 
 
+def _looks_like_graph_dish_count_question(user_text: str) -> bool:
+    text = re.sub(r"\s+", "", str(user_text or "").lower())
+    if not text:
+        return False
+    count_markers = ["多少", "几道", "几种", "数量", "总数", "一共", "共"]
+    graph_markers = ["收录", "图谱", "知识库", "菜谱库", "本地", "当前", "你现在"]
+    dish_markers = ["菜", "菜品", "菜谱", "道菜"]
+    return (
+        any(marker in text for marker in count_markers)
+        and any(marker in text for marker in dish_markers)
+        and any(marker in text for marker in graph_markers)
+    )
+
+
 def _looks_like_bare_recipe_name(user_text: str) -> bool:
     text = re.sub(r"\s+", "", str(user_text or ""))
     if not re.fullmatch(r"[\u4e00-\u9fff]{2,12}", text):
@@ -331,6 +345,9 @@ def _clarification_for_contextless_recipe_attr(user_text: str) -> str | None:
 
 
 def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None:
+    if _looks_like_graph_dish_count_question(user_text):
+        return {"type": "tool", "query": user_text, "reason": "本地图谱菜品数量统计"}
+
     if _looks_like_reverse_ingredient_question(user_text):
         return {"type": "tool", "query": user_text, "reason": "反向食材查询仅使用本地图谱"}
 

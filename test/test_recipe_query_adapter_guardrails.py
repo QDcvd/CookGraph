@@ -77,6 +77,66 @@ class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
                 self.assertNotIn("无法理解的查询格式", result)
                 self.assertNotIn("类型：Technique", result)
 
+    def test_reverse_intent_short_terms_do_not_fall_back_to_forward_parser(self):
+        cases = [
+            ("花甲", ["爆炒花甲"]),
+            ("川菜", ["干锅肥肠", "鱼香肉丝"]),
+            ("香辣味", ["小炒黄牛肉", "香辣牛蛙"]),
+            ("蒸制", ["蒜蓉粉丝虾", "清蒸鲈鱼"]),
+            ("牛肉怎么做", ["小炒黄牛肉", "黑椒牛柳"]),
+            ("虾怎么做", ["蒜蓉粉丝虾", "避风塘炒虾"]),
+        ]
+
+        for query, expected_dishes in cases:
+            with self.subTest(query=query):
+                result = query_recipe_kg(query)
+                self.assertIn("【本地图谱反向查询结果】", result)
+                self.assertIn("web_fallback_allowed: False", result)
+                for dish in expected_dishes:
+                    self.assertIn(dish, result)
+                self.assertNotIn("完整档案", result)
+
+    def test_forward_direct_dish_names_stay_forward(self):
+        for query, dish in [
+            ("小炒黄牛肉怎么做", "小炒黄牛肉"),
+            ("番茄炒蛋怎么做", "番茄炒蛋"),
+            ("清蒸鲈鱼怎么做", "清蒸鲈鱼"),
+            ("西红柿炒鸡蛋怎么做", "番茄炒蛋"),
+        ]:
+            with self.subTest(query=query):
+                result = query_recipe_kg(query)
+                self.assertIn(dish, result)
+                self.assertIn("完整档案", result)
+                self.assertNotIn("【本地图谱反向查询结果】", result)
+
+    def test_unknown_forward_recipe_can_accept_fuzzy_unless_user_excludes_it(self):
+        result = query_recipe_kg("洋葱炒牛肉的做法")
+
+        self.assertIn("洋葱炒肥牛", result)
+        self.assertIn("match_mode: fuzzy", result)
+        self.assertNotIn("web_fallback_allowed: True", result)
+
+        excluded = query_recipe_kg("我不要肥牛，洋葱炒牛肉的做法")
+
+        self.assertIn("success: False", excluded)
+        self.assertIn("web_fallback_allowed: True", excluded)
+
+    def test_unknown_single_recipe_misses_allow_web_fallback(self):
+        for query in ["红烧排骨怎么做", "麻婆豆腐", "凉拌木耳怎么做"]:
+            with self.subTest(query=query):
+                result = query_recipe_kg(query)
+                self.assertIn("success: False", result)
+                self.assertIn("web_fallback_allowed: True", result)
+                self.assertNotIn("【本地图谱反向查询结果】", result)
+
+    def test_graph_dish_count_meta_query_returns_count(self):
+        result = query_recipe_kg("告诉我你现在菜谱一共收录了多少菜")
+
+        self.assertIn("当前收录 50 道菜", result)
+        self.assertIn("query_type: graph_meta", result)
+        self.assertIn("dish_count: 50", result)
+        self.assertIn("web_fallback_allowed: False", result)
+
 
 class AgentPreflightGuardrailTests(unittest.TestCase):
     def test_alias_dish_fire_attribute_routes_to_recipe_tool(self):
@@ -109,6 +169,23 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
 
         self.assertIn("请先告诉我要查询哪道菜", content)
         self.assertEqual(tool_calls, [])
+
+    def test_graph_dish_count_routes_to_recipe_tool(self):
+        async def run():
+            events = []
+            async for event in stream_search_agent("告诉我你现在菜谱一共收录了多少菜", []):
+                events.append(event)
+            return events
+
+        events = asyncio.run(run())
+        content = "".join(event.get("content", "") for event in events if event.get("type") == "content")
+        trace = next((event.get("rag_trace") for event in events if event.get("type") == "trace"), {})
+        tool_calls = trace.get("tool_calls", []) if isinstance(trace, dict) else []
+        tool_names = [item.get("tool_name") for item in tool_calls]
+
+        self.assertIn("recipe_query_tool", tool_names)
+        self.assertIn("50", content)
+        self.assertNotIn("无法获取菜谱知识图谱中收录的菜品数量", content)
 
 
 if __name__ == "__main__":
