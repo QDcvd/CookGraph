@@ -104,48 +104,6 @@ Windows 建议：
 - 推荐在 Git Bash 里运行 `bash deploy_uv.sh`。
 - 如果系统里的 `bash` 是 `C:\Windows\System32\bash.exe`，它会进入 WSL。不要用 WSL bash 混跑 Windows `.venv`。
 
-## 快速启动
-
-PowerShell：
-
-```powershell
-cd E:\miniCookingAgent-Demo
-.\.venv\Scripts\python.exe start.py
-```
-
-Git Bash：
-
-```bash
-cd /e/miniCookingAgent-Demo
-.venv/Scripts/python.exe start.py
-```
-
-默认会启动：
-
-- 后端：`http://localhost:8000`
-- 前端：`http://localhost:5173`
-- 默认适配器：`agent_adapter_local_LLM_harness`
-
-调试大模型返回值：
-
-```bash
-.venv/Scripts/python.exe start.py --debug-llm
-```
-
-禁用远端 LM Studio SSH 隧道：
-
-```bash
-.venv/Scripts/python.exe start.py --no-llm-tunnel
-```
-
-手动指定适配器：
-
-```bash
-.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM_harness
-.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM
-.venv/Scripts/python.exe start.py --adapter agent_adapter
-```
-
 ## Docker 一键启动
 
 项目提供 Docker 一键启动脚本。镜像会在构建时安装 Python/前端依赖，并下载 `gte-large-zh` embedding 模型到 `/opt/minicook/models/gte-large-zh`；项目源码和 `.env` 仍通过 volume 从本机读取。
@@ -209,6 +167,48 @@ UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 NPM_REGISTRY=https://registry.npmmirror.com
 MODEL_SOURCE=modelscope
 MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
+```
+
+## 快速启动
+
+PowerShell：
+
+```powershell
+cd E:\miniCookingAgent-Demo
+.\.venv\Scripts\python.exe start.py
+```
+
+Git Bash：
+
+```bash
+cd /e/miniCookingAgent-Demo
+.venv/Scripts/python.exe start.py
+```
+
+默认会启动：
+
+- 后端：`http://localhost:8000`
+- 前端：`http://localhost:5173`
+- 默认适配器：`agent_adapter_local_LLM_harness`
+
+调试大模型返回值：
+
+```bash
+.venv/Scripts/python.exe start.py --debug-llm
+```
+
+禁用远端 LM Studio SSH 隧道：
+
+```bash
+.venv/Scripts/python.exe start.py --no-llm-tunnel
+```
+
+手动指定适配器：
+
+```bash
+.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM_harness
+.venv/Scripts/python.exe start.py --adapter agent_adapter_local_LLM
+.venv/Scripts/python.exe start.py --adapter agent_adapter
 ```
 
 ## 本地模型配置
