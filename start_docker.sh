@@ -28,6 +28,10 @@ usage() {
   cat <<'EOF'
 MiniCookingAgent-Demo Docker 一键启动
 
+运行环境：
+  仅支持 Ubuntu / WSL / Linux shell。
+  请先进入 Ubuntu/WSL/Linux 环境，再在项目目录执行本脚本。
+
 用法：
   bash start_docker.sh [选项]
 
@@ -47,6 +51,14 @@ MiniCookingAgent-Demo Docker 一键启动
   NPM_REGISTRY=https://registry.npmmirror.com
 EOF
 }
+
+case "$(uname -s 2>/dev/null || true)" in
+  Linux*)
+    ;;
+  *)
+    die "start_docker.sh 仅支持 Ubuntu / WSL / Linux shell。请先进入 Ubuntu/WSL/Linux 环境后再运行。"
+    ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
