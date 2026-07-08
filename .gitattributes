@@ -1,3 +1,13 @@
+# 强制 Shell 脚本使用 LF 换行符（防止 Windows 检出时转 CRLF）
 *.sh text eol=lf
+*.bash text eol=lf
+
+# Dockerfile
 Dockerfile text eol=lf
-docker/* text eol=lf
+docker/Dockerfile text eol=lf
+
+# Python
+*.py text eol=lf
+
+# 其余文本文件自动检测
+* text=auto
