@@ -51,7 +51,7 @@ miniCookingAgent-Demo/
 ├── docker/
 │   └── docker-entrypoint.sh
 ├── deploy_uv.sh                              # uv 一键部署脚本
-├── start_docker.sh                           # Docker 一键构建并启动脚本
+├── start_docker.sh                           # Docker 一键构建并启动脚本（Ubuntu/WSL/Linux）
 ├── .env.example
 ├── requirements.txt
 └── start.py
@@ -145,10 +145,33 @@ cd /e/miniCookingAgent-Demo
 
 项目提供 Docker 一键启动脚本。镜像会在构建时安装 Python/前端依赖，并下载 `gte-large-zh` embedding 模型到 `/opt/minicook/models/gte-large-zh`；项目源码和 `.env` 仍通过 volume 从本机读取。
 
-直接启动：
+`start_docker.sh` **只支持在 Ubuntu / WSL / Linux shell 内运行**。Windows 用户请先进入 WSL/Ubuntu，再进入项目目录执行脚本；不要在 PowerShell、CMD 或 Windows Git Bash 中直接运行这个脚本。
+
+WSL/Ubuntu 示例：
 
 ```bash
+cd /mnt/e/miniCookingAgent-Demo
 bash start_docker.sh
+```
+
+如果项目在其他盘符，例如你在 WSL 中看到的路径是 `/mnt/g/miniCookingAgent-Demo`，就进入对应目录后再执行：
+
+```bash
+cd /mnt/g/miniCookingAgent-Demo
+bash start_docker.sh
+```
+
+运行前确认 WSL 内可用 Docker：
+
+```bash
+docker --version
+docker ps
+```
+
+如果出现 `set: pipefail: invalid option name` 或类似 `^M` 报错，说明脚本在当前副本里被保存成了 Windows CRLF 换行。先修正换行：
+
+```bash
+sed -i 's/\r$//' start_docker.sh
 ```
 
 脚本会自动：
