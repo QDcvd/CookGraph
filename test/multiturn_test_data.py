@@ -356,6 +356,57 @@ MULTITURN_TEST_CASES: list[dict[str, Any]] = [
             ),
         ],
     ),
+    dict(
+        id="distraction_008",
+        category="distraction",
+        description="连续多意图顺序测试：寒暄、别名火力、开放做法、新菜未命中/命中、最后需识别本地图谱外的牛肉部位推荐并联网",
+        expected_behavior=(
+            "寒暄不调用工具；西红柿炒蛋火力必须本地图谱命中番茄炒蛋；"
+            "猪肉开放问法不能污染后续新菜；牛蛙炒辣椒和洋葱炒牛肉都应按当前输入重新查询；"
+            "最后用户排除肥牛并要求推荐三种牛肉部位，已超出本地图谱单菜谱范围，应使用联网搜索补充部位和做法"
+        ),
+        forbidden_behavior="把后续问题按旧菜回答，或最后不用联网就凭常识推荐牛肉部位",
+        turns=[
+            dict(
+                user="你好",
+                expect_tools=[],
+                forbid_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=[],
+                forbid_keywords=["番茄炒蛋", "猪肉", "牛蛙", "洋葱炒牛肉"],
+            ),
+            dict(
+                user="告诉我西红柿炒蛋的火力调配参数",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["番茄炒蛋", "西红柿炒蛋", "火力", "中火", "大火"],
+                forbid_keywords=["请先告诉我要查询哪道菜", "web_search_tool", "联网搜索"],
+            ),
+            dict(
+                user="猪肉有多少种做法",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["猪肉"],
+                forbid_keywords=["番茄炒蛋", "西红柿炒蛋", "牛蛙炒辣椒", "洋葱炒牛肉"],
+            ),
+            dict(
+                user="牛蛙炒辣椒怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["牛蛙炒辣椒", "牛蛙", "辣椒"],
+                forbid_keywords=["猪肉有多少种做法", "番茄炒蛋", "洋葱炒牛肉"],
+            ),
+            dict(
+                user="洋葱炒牛肉怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["洋葱", "牛肉"],
+                forbid_keywords=["牛蛙炒辣椒", "猪肉有多少种做法", "番茄炒蛋"],
+            ),
+            dict(
+                user="我不想用肥牛，给我推荐三种适合炒洋葱的牛肉部位并分别给出做法，重复的步骤可以合并",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["牛肉", "洋葱", "部位", "做法"],
+                forbid_keywords=["肥牛卷", "洋葱炒肥牛", "根据本地菜谱图谱，洋葱炒肥牛可以这样做"],
+                expect_web_fallback=True,
+            ),
+        ],
+    ),
     # ═══════════════════════════════════════════
     # contradiction 类 — 逻辑自洽
     # ═══════════════════════════════════════════

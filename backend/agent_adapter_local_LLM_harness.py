@@ -251,6 +251,8 @@ def _looks_like_reverse_ingredient_question(user_text: str) -> bool:
     text = re.sub(r"\s+", "", str(user_text or "").lower())
     if re.search(r"[\u4e00-\u9fff]{1,12}(?:可以|能|可|能够)?(?:用来)?做(?:什么|哪些|啥).{0,4}菜?$", text):
         return True
+    if re.search(r"[\u4e00-\u9fff]{1,12}有多少(?:种)?(?:做法|吃法|菜式)$", text):
+        return True
     if re.search(r"^(?:有哪些|有什么|哪些)[\u4e00-\u9fff]{1,12}菜(?:推荐)?$", text):
         return True
     return False
@@ -262,6 +264,34 @@ def _looks_like_bare_recipe_name(user_text: str) -> bool:
         return False
     non_recipe_exact = {"你好", "您好", "谢谢", "天气", "模型"}
     if text in non_recipe_exact:
+        return False
+    dish_markers = ["炒", "蒸", "煮", "炸", "煎", "炖", "焖", "烤", "拌", "肉", "鸡", "鱼", "虾", "蛙", "肠", "蛋", "菜", "汤"]
+    return any(marker in text for marker in dish_markers)
+
+
+def _looks_like_recipe_attribute_with_dish_hint(user_text: str) -> bool:
+    text = re.sub(r"\s+", "", str(user_text or ""))
+    if not text:
+        return False
+    attribute_markers = [
+        "火力",
+        "火候",
+        "调配参数",
+        "参数",
+        "注意事项",
+        "注意点",
+        "提示",
+        "要点",
+        "调料",
+        "调味",
+        "配料",
+        "用料",
+        "材料",
+        "怎么做",
+        "做法",
+        "步骤",
+    ]
+    if not any(marker in text for marker in attribute_markers):
         return False
     dish_markers = ["炒", "蒸", "煮", "炸", "煎", "炖", "焖", "烤", "拌", "肉", "鸡", "鱼", "虾", "蛙", "肠", "蛋", "菜", "汤"]
     return any(marker in text for marker in dish_markers)
@@ -309,6 +339,9 @@ def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None
 
     if _looks_like_bare_recipe_name(user_text):
         return {"type": "tool", "query": user_text, "reason": "裸菜式短语先查本地图谱"}
+
+    if _looks_like_recipe_attribute_with_dish_hint(user_text):
+        return {"type": "tool", "query": user_text, "reason": "菜谱属性问题含菜式线索，交由本地图谱语义归一"}
 
     contextual_query = _contextual_recipe_query(user_text, history)
     if contextual_query:
@@ -646,7 +679,12 @@ def _build_grounded_recipe_answer(user_text: str, tool_context: list[dict]) -> s
     for item in reversed(tool_context):
         if item.get("tool_name") == "recipe_query_tool":
             content = str(item.get("content") or "")
-            if "success: True" in content and "cooking_method_desc:" in content:
+            if "success: True" in content and (
+                "cooking_method_desc:" in content
+                or "cooking_method_desc：" in content
+                or "fire_control_process:" in content
+                or "fire_control_process：" in content
+            ):
                 recipe_item = item
                 break
     if recipe_item is None:
@@ -660,6 +698,18 @@ def _build_grounded_recipe_answer(user_text: str, tool_context: list[dict]) -> s
     ingredients = _extract_bullet_section(content, "主要食材")
     sides = _extract_bullet_section(content, "配料")
     seasonings = _extract_bullet_section(content, "调味品")
+
+    if not method and fire:
+        fire_points = _split_semicolon_items(fire)
+        lines = [f"根据本地菜谱图谱，{dish}的火力调配参数是：", ""]
+        if fire_points:
+            for item in fire_points:
+                lines.append(f"- {item}")
+        else:
+            lines.append(fire)
+        lines.append("")
+        lines.append("以上内容来自本地菜谱知识图谱。")
+        return "\n".join(lines)
 
     if not method:
         return ""
@@ -765,7 +815,7 @@ def _extract_query_dish_name(user_text: str) -> str:
 
 
 def _extract_recipe_field(content: str, field: str) -> str:
-    pattern = rf"(?m)^{re.escape(field)}:\s*(.*)$"
+    pattern = rf"(?m)^{re.escape(field)}[：:]\s*(.*)$"
     match = re.search(pattern, content)
     return match.group(1).strip() if match else ""
 

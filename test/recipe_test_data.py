@@ -1,8 +1,8 @@
 """菜谱查询测试数据集 — 供 run_recall_test.py 使用。
 
-共 100 条用例，分 8 个维度：
+共 150 条用例，分 9 个维度：
   第一阶段（core）：50 条
-  第二阶段（ext）：50 条
+  第二阶段（ext）：100 条
 """
 
 from typing import Any
@@ -149,4 +149,58 @@ TEST_CASES: list[dict[str, Any]] = [
     dict(id=118, input="白灼虾怎么做",            category="联网兜底", phase=2, query_type="forward_attr", expected=[], strict_ok=False, eval_type="web_fallback", note="图谱未命中，期望联网搜索"),
     dict(id=119, input="羊肉泡馍怎么做",          category="联网兜底", phase=2, query_type="forward_attr", expected=[], strict_ok=False, eval_type="web_fallback", note="图谱未命中，期望联网搜索"),
     dict(id=120, input="小笼包怎么做",            category="联网兜底", phase=2, query_type="forward_attr", expected=[], strict_ok=False, eval_type="web_fallback", note="图谱未命中，期望联网搜索"),
+
+    # ═══════════════════════════════════════════
+    # 九、反向查询 — 食材做法数 (121-170) — 第二阶段
+    # ═══════════════════════════════════════════
+    dict(id=121, input="牛肉有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["小炒黄牛肉", "干炒牛河", "黑椒牛柳"], strict_ok=True, note="泛称牛肉，必须只列本地图谱明确命中"),
+    dict(id=122, input="虾有多少种做法",            category="反向-食材-做法数", phase=2, query_type="reverse", expected=["蒜蓉粉丝虾", "避风塘炒虾"], strict_ok=True, note="鲜虾泛称"),
+    dict(id=123, input="猪肉有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["青椒肉丝", "糖醋里脊", "辣椒炒肉"], strict_ok=True, note="泛称猪肉"),
+    dict(id=124, input="鸡蛋有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["番茄炒蛋", "韭菜炒鸡蛋", "西葫芦炒鸡蛋"], strict_ok=True, note="鸡蛋反查"),
+    dict(id=125, input="莲藕有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["荷塘月色", "炝炒藕片", "香辣藕丁"], strict_ok=True, note="莲藕反查"),
+    dict(id=126, input="鲜虾有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["蒜蓉粉丝虾", "避风塘炒虾"], strict_ok=True, note="精确鲜虾"),
+    dict(id=127, input="牛里脊有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["黑椒牛柳", "丝瓜牛肉"], strict_ok=True, note="牛里脊别名"),
+    dict(id=128, input="香干有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["芹菜炒香干", "香干炒肉"], strict_ok=True, note="香干反查"),
+    dict(id=129, input="荷兰豆有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["荷兰豆炒腊肉", "荷塘月色"], strict_ok=True, note="荷兰豆反查"),
+    dict(id=130, input="山药有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["荷塘月色", "木耳炒山药"], strict_ok=True, note="山药反查"),
+    dict(id=131, input="香菇有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["香菇扒油菜", "香菇炒肉"], strict_ok=True, note="鲜香菇泛称"),
+    dict(id=132, input="丝瓜有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["清炒丝瓜", "丝瓜牛肉"], strict_ok=True, note="丝瓜反查"),
+    dict(id=133, input="肥牛有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["洋葱炒肥牛", "番茄金针菇肥牛"], strict_ok=True, note="肥牛卷泛称"),
+    dict(id=134, input="鸡胸肉有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["彩椒炒鸡丁", "西蓝花炒鸡胸肉"], strict_ok=True, note="鸡胸肉反查"),
+    dict(id=135, input="番茄有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["番茄金针菇肥牛", "番茄炒蛋"], strict_ok=True, note="番茄反查"),
+    dict(id=136, input="黄牛肉有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["小炒黄牛肉"], strict_ok=True, note="精确黄牛肉"),
+    dict(id=137, input="猪大肠有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["干锅肥肠"], strict_ok=True, note="猪大肠反查"),
+    dict(id=138, input="牛蛙有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["香辣牛蛙"], strict_ok=True, note="牛蛙反查"),
+    dict(id=139, input="鱿鱼有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["姜葱炒鱿鱼"], strict_ok=True, note="鲜鱿鱼泛称"),
+    dict(id=140, input="河粉有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["干炒牛河"], strict_ok=True, note="河粉反查"),
+    dict(id=141, input="年糕有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["韩式辣炒年糕"], strict_ok=True, note="年糕条泛称"),
+    dict(id=142, input="鸡腿肉有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["泰式咖喱鸡"], strict_ok=True, note="鸡腿肉反查"),
+    dict(id=143, input="花甲有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["爆炒花甲"], strict_ok=True, note="花甲反查"),
+    dict(id=144, input="包菜有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["手撕包菜"], strict_ok=True, note="包菜反查"),
+    dict(id=145, input="西兰花有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["蒜蓉西兰花", "西蓝花炒鸡胸肉"], strict_ok=True, note="西兰花/西蓝花归并"),
+    dict(id=146, input="芹菜有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["芹菜炒香干"], strict_ok=True, note="芹菜反查"),
+    dict(id=147, input="腊肉有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["荷兰豆炒腊肉"], strict_ok=True, note="腊肉反查"),
+    dict(id=148, input="蒜苔有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["蒜苔炒肉"], strict_ok=True, note="蒜苔反查"),
+    dict(id=149, input="西葫芦有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["西葫芦炒鸡蛋"], strict_ok=True, note="西葫芦反查"),
+    dict(id=150, input="菜心有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["白灼菜心"], strict_ok=True, note="菜心反查"),
+    dict(id=151, input="胡萝卜有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["荷塘月色"], strict_ok=True, note="胡萝卜反查"),
+    dict(id=152, input="木耳有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["荷塘月色", "木耳炒山药"], strict_ok=True, note="木耳/水发木耳归并"),
+    dict(id=153, input="油菜有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["香菇扒油菜"], strict_ok=True, note="油菜反查"),
+    dict(id=154, input="菜花有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["干煸菜花"], strict_ok=True, note="菜花反查"),
+    dict(id=155, input="洋葱有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["洋葱炒肥牛"], strict_ok=True, note="洋葱反查"),
+    dict(id=156, input="鸡杂有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["泡椒鸡杂"], strict_ok=True, note="鸡胗/鸡肝/鸡心归并"),
+    dict(id=157, input="玉米有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["椒盐玉米", "玉米排骨汤"], strict_ok=True, note="甜玉米/玉米粒归并"),
+    dict(id=158, input="豆腐有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["香煎豆腐"], strict_ok=True, note="老豆腐泛称"),
+    dict(id=159, input="蛤蜊有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["爆炒花甲", "葱香花蛤"], strict_ok=True, note="花蛤/花甲归并"),
+    dict(id=160, input="土豆有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["清炒土豆丝"], strict_ok=True, note="土豆反查"),
+    dict(id=161, input="金针菇有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["番茄金针菇肥牛"], strict_ok=True, note="金针菇反查"),
+    dict(id=162, input="鲈鱼有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["清蒸鲈鱼"], strict_ok=True, note="鲈鱼反查"),
+    dict(id=163, input="紫菜有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["紫菜蛋花汤"], strict_ok=True, note="紫菜反查"),
+    dict(id=164, input="韭菜有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["韭菜炒鸡蛋"], strict_ok=True, note="韭菜反查"),
+    dict(id=165, input="排骨有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["玉米排骨汤"], strict_ok=True, note="猪排骨泛称"),
+    dict(id=166, input="生菜有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["蒜蓉生菜"], strict_ok=True, note="生菜反查"),
+    dict(id=167, input="鸡翅有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["可乐鸡翅"], strict_ok=True, note="鸡翅中泛称"),
+    dict(id=168, input="三黄鸡有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["小炒鸡"], strict_ok=True, note="三黄鸡反查"),
+    dict(id=169, input="鸡胸有多少种做法",          category="反向-食材-做法数", phase=2, query_type="reverse", expected=["彩椒炒鸡丁", "西蓝花炒鸡胸肉"], strict_ok=True, note="鸡胸肉口语泛称"),
+    dict(id=170, input="鲜鱿鱼有多少种做法",        category="反向-食材-做法数", phase=2, query_type="reverse", expected=["姜葱炒鱿鱼"], strict_ok=True, note="精确鲜鱿鱼"),
 ]
