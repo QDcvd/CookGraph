@@ -23,6 +23,7 @@ from backend.context_manager import (
     history_context_summary,
     recent_context_paths,
 )
+from backend.recipe_query_adapter import kg_dish_names
 from backend.token_usage_tracker import TokenUsageTracker
 from backend.tool_calling import (
     _append_tool_result_to_trace,
@@ -217,6 +218,109 @@ def _recipe_query_needs_web_fallback(content: str) -> bool:
     return any(marker in text for marker in miss_markers)
 
 
+def _last_dish_from_history(history: list[dict]) -> str:
+    for item in history:
+        if item.get("role") != "runtime_memory":
+            continue
+        content = str(item.get("content") or "")
+        match = re.search(r"最近菜品[:：]\s*([^\n\r]+)", content)
+        if match:
+            return match.group(1).strip()
+    for item in reversed(history):
+        trace = item.get("rag_trace")
+        if not isinstance(trace, dict):
+            continue
+        hybrid = trace.get("hybrid_retrieval")
+        if isinstance(hybrid, dict) and hybrid.get("standard_dish"):
+            return str(hybrid.get("standard_dish")).strip()
+    return ""
+
+
+def _contains_current_dish_name(user_text: str) -> bool:
+    text = str(user_text or "")
+    if not text:
+        return False
+    try:
+        names = kg_dish_names()
+    except Exception:
+        names = set()
+    return any(name and name in text for name in names)
+
+
+def _looks_like_reverse_ingredient_question(user_text: str) -> bool:
+    text = re.sub(r"\s+", "", str(user_text or "").lower())
+    if re.search(r"[\u4e00-\u9fff]{1,12}(?:可以|能|可|能够)?(?:用来)?做(?:什么|哪些|啥).{0,4}菜?$", text):
+        return True
+    if re.search(r"^(?:有哪些|有什么|哪些)[\u4e00-\u9fff]{1,12}菜(?:推荐)?$", text):
+        return True
+    return False
+
+
+def _looks_like_bare_recipe_name(user_text: str) -> bool:
+    text = re.sub(r"\s+", "", str(user_text or ""))
+    if not re.fullmatch(r"[\u4e00-\u9fff]{2,12}", text):
+        return False
+    non_recipe_exact = {"你好", "您好", "谢谢", "天气", "模型"}
+    if text in non_recipe_exact:
+        return False
+    dish_markers = ["炒", "蒸", "煮", "炸", "煎", "炖", "焖", "烤", "拌", "肉", "鸡", "鱼", "虾", "蛙", "肠", "蛋", "菜", "汤"]
+    return any(marker in text for marker in dish_markers)
+
+
+def _contextual_recipe_query(user_text: str, history: list[dict]) -> str | None:
+    text = re.sub(r"\s+", "", str(user_text or ""))
+    if not text or _contains_current_dish_name(text):
+        return None
+
+    last_dish = _last_dish_from_history(history)
+    if not last_dish:
+        return None
+
+    if any(marker in text for marker in ["火力", "火候"]):
+        return f"{last_dish}的火力调节过程"
+    if any(marker in text for marker in ["注意事项", "注意点", "提示", "要点", "为什么"]):
+        return f"{last_dish}烹饪提示"
+    if any(marker in text for marker in ["调料", "调味", "配料", "用料", "材料"]):
+        return f"{last_dish}的调味品"
+    if any(marker in text for marker in ["怎么做", "做法", "步骤", "它", "这道菜", "刚才那道菜"]):
+        return f"{last_dish}怎么做"
+    return None
+
+
+def _clarification_for_contextless_recipe_attr(user_text: str) -> str | None:
+    text = re.sub(r"\s+", "", str(user_text or ""))
+    if not text or _contains_current_dish_name(text):
+        return None
+    if any(marker in text for marker in ["火力", "火候"]):
+        return "请先告诉我要查询哪道菜的火力控制。"
+    if text in {"注意事项", "注意点", "提示", "要点"}:
+        return "请先告诉我要查询哪道菜的注意事项。"
+    if text in {"调料", "调料呢", "配料", "配料呢", "用料", "材料"}:
+        return "请先告诉我要查询哪道菜的用料或调料。"
+    return None
+
+
+def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None:
+    if _looks_like_reverse_ingredient_question(user_text):
+        return {"type": "tool", "query": user_text, "reason": "反向食材查询仅使用本地图谱"}
+
+    if _contains_current_dish_name(user_text):
+        return {"type": "tool", "query": user_text, "reason": "当前输入包含明确新菜名，覆盖旧上下文"}
+
+    if _looks_like_bare_recipe_name(user_text):
+        return {"type": "tool", "query": user_text, "reason": "裸菜式短语先查本地图谱"}
+
+    contextual_query = _contextual_recipe_query(user_text, history)
+    if contextual_query:
+        return {"type": "tool", "query": contextual_query, "reason": "根据当前会话最近菜品补全属性追问"}
+
+    clarification = _clarification_for_contextless_recipe_attr(user_text)
+    if clarification:
+        return {"type": "content", "content": clarification}
+
+    return None
+
+
 async def _execute_web_fallback_after_recipe(
     user_text: str,
     messages: list[Any],
@@ -272,6 +376,22 @@ async def _emit_final_answer_from_tool_context(
     """工具执行完成后，用不绑定 tools 的普通模型整理最终回答。"""
     yield {"type": "trace", "rag_trace": trace}
     yield {"type": "rag_step", "step": {"label": "正在整理最终回答...", "icon": "✍️"}}
+    grounded_reverse_answer = _build_grounded_reverse_answer(tool_context)
+    if grounded_reverse_answer:
+        yield {"type": "content", "content": grounded_reverse_answer}
+        if token_tracker is not None:
+            trace["token_usage"] = token_tracker.snapshot(final=True)
+            yield {"type": "token_usage", "token_usage": trace["token_usage"]}
+        return
+
+    grounded_web_fallback_answer = _build_grounded_web_fallback_answer(user_text, tool_context)
+    if grounded_web_fallback_answer:
+        yield {"type": "content", "content": grounded_web_fallback_answer}
+        if token_tracker is not None:
+            trace["token_usage"] = token_tracker.snapshot(final=True)
+            yield {"type": "token_usage", "token_usage": trace["token_usage"]}
+        return
+
     grounded_recipe_answer = _build_grounded_recipe_answer(user_text, tool_context)
     if grounded_recipe_answer:
         yield {"type": "content", "content": grounded_recipe_answer}
@@ -577,6 +697,56 @@ def _build_grounded_recipe_answer(user_text: str, tool_context: list[dict]) -> s
     return "\n".join(lines)
 
 
+def _build_grounded_reverse_answer(tool_context: list[dict]) -> str:
+    for item in reversed(tool_context):
+        if item.get("tool_name") != "recipe_query_tool":
+            continue
+        content = str(item.get("content") or "")
+        if "【本地图谱反向查询结果】" not in content:
+            continue
+        lines = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == "结构化摘要：":
+                break
+            if stripped.startswith("【本地图谱反向查询结果】"):
+                continue
+            lines.append(stripped)
+        if lines:
+            return "\n".join(lines)
+    return ""
+
+
+def _build_grounded_web_fallback_answer(user_text: str, tool_context: list[dict]) -> str:
+    recipe_miss = False
+    web_content = ""
+    for item in tool_context:
+        tool_name = item.get("tool_name")
+        content = str(item.get("content") or "")
+        if tool_name == "recipe_query_tool" and "success: False" in content and "web_fallback_allowed: True" in content:
+            recipe_miss = True
+        if tool_name == "web_search_tool":
+            web_content = content
+
+    if not recipe_miss or not web_content:
+        return ""
+
+    lines = [f"本地菜谱图谱未收录“{user_text}”。"]
+    if "网络搜索失败" in web_content or "网络搜索没有返回内容" in web_content:
+        lines.append(f"已尝试联网搜索，但搜索工具没有返回可用结果：{web_content.strip()}")
+        lines.append("因此我不能把它当成本地图谱菜谱，也不会凭常识编做法。")
+        return "\n".join(lines)
+
+    lines.append("以下是联网搜索返回的公开网页摘要，建议核对来源后再使用：")
+    for raw_line in web_content.splitlines()[1:12]:
+        line = raw_line.strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def _extract_recipe_dish_name(content: str) -> str:
     match = re.search(r"【([^】\n]+?)\s+完整档案】", content)
     if match:
@@ -834,6 +1004,15 @@ def _looks_like_tool_request(user_text: str) -> bool:
         "技法",
         "口味",
         "菜系",
+        "炒",
+        "蒸",
+        "煮",
+        "炸",
+        "煎",
+        "炖",
+        "焖",
+        "烤",
+        "拌",
     ]
     return any(keyword in text for keyword in tool_keywords)
 
@@ -943,6 +1122,41 @@ async def stream_search_agent(user_text: str, history: list[dict]):
 
     try:
         async with asyncio.timeout(AGENT_TIMEOUT_SECONDS):
+            preflight = _preflight_recipe_action(user_text, history)
+            if preflight is not None:
+                if preflight.get("type") == "content":
+                    content = str(preflight.get("content") or "")
+                    token_tracker.add_generated_text(content)
+                    trace["token_usage"] = token_tracker.snapshot(final=True)
+                    yield {"type": "trace", "rag_trace": trace}
+                    yield _token_usage_event(token_tracker, final=True)
+                    yield {"type": "content", "content": content}
+                    return
+
+                query = str(preflight.get("query") or user_text)
+                yield {
+                    "type": "rag_step",
+                    "step": {
+                        "label": "确定性菜谱路由：recipe_query_tool",
+                        "icon": "🧭",
+                        "detail": f"{preflight.get('reason')}: {query}",
+                    },
+                }
+                total_tool_calls += await _execute_forced_tool_call(
+                    user_text,
+                    messages,
+                    trace,
+                    tool_context,
+                    "recipe_query_tool",
+                    {"query": query},
+                    "preflight_recipe_route",
+                )
+                async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory, token_tracker):
+                    if event.get("type") == "token_usage":
+                        trace["token_usage"] = event.get("token_usage")
+                    yield event
+                return
+
             for turn_index in range(MAX_TOOL_TURNS):
                 yield {
                     "type": "rag_step",

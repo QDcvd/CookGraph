@@ -23,6 +23,13 @@ DEFAULT_RECIPE_KG_PATH = PROJECT_ROOT / "config" / "chem+recipe_kg_updated_fire.
 _recipe_module = None
 _recipe_system = None
 
+INGREDIENT_GROUPS: dict[str, list[str]] = {
+    "牛肉": ["牛肉", "黄牛肉", "牛里脊", "牛里脊肉", "肥牛", "肥牛卷"],
+    "鱼": ["鱼", "鲈鱼"],
+    "鸡肉": ["鸡肉", "鸡腿肉", "三黄鸡", "鸡胸肉", "鸡翅", "鸡翅中"],
+    "猪肉": ["猪肉", "猪里脊", "猪里脊肉", "猪前腿肉", "猪大肠", "猪排骨", "排骨"],
+}
+
 
 def _load_recipe_module():
     """动态加载菜谱查询脚本，返回 module 对象。"""
@@ -72,6 +79,8 @@ def _looks_like_reverse_recipe_query(query: str) -> bool:
     normalized = _normalize_query_text(query)
     if re.search(r"有(?:什么|哪些).{0,8}菜", normalized):
         return True
+    if re.search(r"[\u4e00-\u9fff]{1,12}(?:可以|能|可|能够)?(?:用来)?做(?:什么|哪些|啥).{0,4}菜?", normalized):
+        return True
     reverse_patterns = [
         "哪些菜",
         "哪些菜式",
@@ -80,6 +89,24 @@ def _looks_like_reverse_recipe_query(query: str) -> bool:
         "哪道菜",
     ]
     return any(pattern in query for pattern in reverse_patterns)
+
+
+def _extract_reverse_ingredient_query(query: str) -> str:
+    """Extract the ingredient from open reverse questions like 牛肉可以做什么菜."""
+    text = _normalize_query_text(query)
+    patterns = [
+        r"^(?P<ingredient>[\u4e00-\u9fff]{1,12}?)(?:可以|能|可|能够)(?:用来)?做(?:什么|哪些|啥).{0,4}菜?$",
+        r"^(?P<ingredient>[\u4e00-\u9fff]{1,12}?)(?:用来)?做(?:什么|哪些|啥).{0,4}菜?$",
+        r"^(?:有哪些|有什么|哪些)(?P<ingredient>[\u4e00-\u9fff]{1,12})菜(?:推荐)?$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            ingredient = match.group("ingredient").strip()
+            ingredient = re.sub(r"(可以|能|可|能够|用来)$", "", ingredient).strip()
+            if ingredient:
+                return ingredient
+    return ""
 
 
 def _normalize_query_text(query: str) -> str:
@@ -210,6 +237,86 @@ def _kg_dish_names(system: Any) -> set[str]:
     return set()
 
 
+def kg_dish_names(kg_path: str | None = None) -> set[str]:
+    """Public helper for deterministic routing against current runtime KG."""
+    return _kg_dish_names(_get_recipe_system(kg_path))
+
+
+def _ingredient_aliases(ingredient: str) -> list[str]:
+    key = str(ingredient or "").strip()
+    if not key:
+        return []
+    aliases = INGREDIENT_GROUPS.get(key, [key])
+    return list(dict.fromkeys([key, *aliases]))
+
+
+def _query_reverse_ingredient_local(system: Any, ingredient: str) -> str | None:
+    aliases = _ingredient_aliases(ingredient)
+    if not aliases:
+        return None
+
+    executor = getattr(system, "executor", None)
+    graph = getattr(executor, "graph", None)
+    dish_nodes = getattr(executor, "dish_nodes", None)
+    if graph is None or not isinstance(dish_nodes, dict):
+        return None
+
+    dishes: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for dish_name, dish_id in dish_nodes.items():
+        for _, target_id, edge_data in graph.edges(dish_id, data=True):
+            edge_rel = edge_data.get("relation") or edge_data.get("type")
+            if edge_rel != "USES_MAIN_INGREDIENT":
+                continue
+            target_node = graph.nodes[target_id]
+            ingredient_name = str(target_node.get("name") or "")
+            if ingredient_name not in aliases:
+                continue
+            if dish_name in seen:
+                continue
+            seen.add(dish_name)
+            dishes.append({
+                "dish_name": str(dish_name),
+                "matched_ingredient": ingredient_name,
+                "amount": str(edge_data.get("amount") or ""),
+            })
+
+    alias_text = "、".join(aliases)
+    if not dishes:
+        return (
+            "【本地图谱反向查询结果】\n"
+            f"查询食材：{ingredient}\n"
+            f"归并食材：{alias_text}\n"
+            "未找到本地图谱中明确以这些食材为主要食材的菜。\n\n"
+            "结构化摘要：\n"
+            "success: True\n"
+            "query_type: reverse_ingredient\n"
+            "match_mode: exact\n"
+            "web_fallback_allowed: False"
+        )
+
+    lines = [
+        "【本地图谱反向查询结果】",
+        f"查询食材：{ingredient}",
+        f"归并食材：{alias_text}",
+        f"本地图谱中明确命中的菜（共{len(dishes)}道）：",
+    ]
+    for index, item in enumerate(dishes, start=1):
+        amount = f"（{item['matched_ingredient']}，用量：{item['amount']}）" if item["amount"] else f"（{item['matched_ingredient']}）"
+        lines.append(f"{index}. {item['dish_name']}{amount}")
+    lines.extend([
+        "",
+        "说明：以上只来自本地菜谱图谱的主要食材关系，未使用联网搜索，也未补充常识菜。",
+        "",
+        "结构化摘要：",
+        "success: True",
+        "query_type: reverse_ingredient",
+        "match_mode: exact",
+        "web_fallback_allowed: False",
+    ])
+    return "\n".join(lines)
+
+
 def _semantic_rewrite_query(query: str, system: Any) -> tuple[str, RecipeSemanticMatch | None, str | None]:
     """用本地 embedding 将自然菜名改写为图谱标准菜名查询。"""
     if _looks_like_reverse_recipe_query(query):
@@ -315,6 +422,12 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
     except Exception as e:
         return f"菜谱查询失败：{type(e).__name__}: {e}"
 
+    reverse_ingredient = _extract_reverse_ingredient_query(text)
+    if reverse_ingredient:
+        reverse_output = _query_reverse_ingredient_local(system, reverse_ingredient)
+        if reverse_output:
+            return reverse_output
+
     effective_query, semantic_match, semantic_note = _semantic_rewrite_query(text, system)
 
     # 执行查询，捕获 stdout
@@ -342,6 +455,13 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
         if isinstance(fallback_result, dict) and _result_is_success(fallback_result):
             result = fallback_result
             fallback_note = f"图谱自校正：改写查询未命中，已退回标准菜名 {semantic_match.dish_name} 查询。"
+            semantic_note = f"{semantic_note}；{fallback_note}" if semantic_note else fallback_note
+
+    if _result_is_success(result) and _result_has_empty_payload(result):
+        fallback_result = _fallback_to_summary_when_empty(system, result)
+        if isinstance(fallback_result, dict) and _result_is_success(fallback_result):
+            result = fallback_result
+            fallback_note = "图谱自校正：属性查询命中但内容为空，已退回完整档案查询。"
             semantic_note = f"{semantic_note}；{fallback_note}" if semantic_note else fallback_note
 
     # 优先取 human_readable
@@ -379,3 +499,27 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
         output += "\n\n语义召回摘要：\n" + semantic_note
 
     return output
+
+
+def _result_has_empty_payload(result: dict) -> bool:
+    human = str(result.get("human_readable") or "")
+    value = str(result.get("value") or "")
+    empty_markers = ["无数据", "无数据或未记录", "cooking_process：\n========================================\n无数据"]
+    return any(marker in human for marker in empty_markers) or value.strip() in {"", "无数据", "None", "nan"}
+
+
+def _fallback_to_summary_when_empty(system: Any, result: dict) -> dict | None:
+    structured = result.get("structured") if isinstance(result.get("structured"), dict) else {}
+    dish_name = ""
+    dish = result.get("dish")
+    if isinstance(dish, dict):
+        dish_name = str(dish.get("matched") or dish.get("original") or "").strip()
+    if not dish_name:
+        dish_name = str(structured.get("dish_name") or "").strip()
+    if not dish_name:
+        return None
+    try:
+        fallback = _query_system(system, dish_name)
+    except Exception:
+        return None
+    return fallback if isinstance(fallback, dict) else None

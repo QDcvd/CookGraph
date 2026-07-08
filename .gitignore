@@ -33,6 +33,7 @@ test/test_report.md
 test/multiturn_test_results.json
 test/multiturn_test_report.md
 test/__pycache__/
+test/testdata/
 
 # ── Claude Code 配置 / 技能（可重新安装） ──
 .claude/

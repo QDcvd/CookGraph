@@ -1,17 +1,20 @@
 # 用户发消息后的调用链
 
-本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、Agent 工具循环，到菜谱混合召回、知识图谱查询、联网兜底、SSE 回传和 SQLite 落库的完整链路。
+本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、确定性菜谱路由、Agent 工具循环，到菜谱混合召回、知识图谱查询、联网兜底、最终回答约束、SSE 回传和 SQLite 落库的完整链路。
 
-## 当前关键点
+## 当前关键变化
 
-- 前端通过 `session_id` 维持当前对话；打开历史会话时从 `/sessions/{session_id}` 恢复消息和 `rag_trace`。
+- 前端仍通过 `session_id` 维持当前对话；历史会话从 `/sessions/{session_id}` 恢复消息和 `rag_trace`。
 - 后端 `memory_store` 是运行期缓存，`data/memory.sqlite3` 是进程重启后的事实来源。
 - 用户消息写入后，会立即抽取长期偏好并写入 `preference_memory`。
 - 每轮请求都会构造 Zleap-lite runtime memory，注入长期偏好和当前 session 菜谱上下文。
-- `recipe_query_tool` 是唯一暴露给模型的菜谱工具；语义召回、别名、TF-IDF、RRF 和知识图谱查询都藏在这个工具内部。
+- `stream_search_agent()` 现在先跑 `_preflight_recipe_action()`，对一批高风险菜谱问题做确定性路由，再决定是否进入模型工具循环。
+- `recipe_query_tool` 仍是唯一菜谱工具；语义召回、别名、TF-IDF、dense embedding、RRF、知识图谱查询都藏在这个工具内部。
+- 反向食材查询如“牛肉可以做什么菜”由后端直接查本地图谱主食材关系，只列图谱明确命中的菜，不联网，不补常识。
+- 无明确菜名的属性追问如“火力要怎么控制”会先要求用户补充菜名，避免被历史上下文或模型常识带偏。
 - 本地图谱明确允许联网兜底且未命中时，工具循环自动补一次 `web_search_tool`。
+- 最终回答阶段先尝试确定性 grounded answer：反向查询、本地菜谱命中、联网兜底都有专门约束；只有无法确定性整理时才调用 content-only 模型。
 - assistant 最终回答和本轮 `rag_trace` 会一起持久化；随后根据 trace 更新当前 session 的 `recipe_context_json`。
-- Docker 镜像内可通过 `MINICOOK_EMBEDDING_MODEL_DIR=/opt/minicook/models/gte-large-zh` 使用内置 embedding 模型；本机部署默认使用 `models/gte-large-zh`。
 
 ## 0. 总流程图
 
@@ -40,36 +43,49 @@ flowchart TD
     P --> Q["SSE event_generator()"]
 
     Q --> R["stream_search_agent(user_text, history)"]
-    R --> S["工具循环模型<br/>recipe_query_tool + web_search_tool"]
-    S --> T{"模型是否调用工具?"}
-    T -->|结构化 tool_calls| U["_execute_tool_call()"]
-    T -->|文本式工具调用| V["_parse_textual_tool_call()<br/>转真实工具调用"]
-    V --> U
-    T -->|直接回答| W["SSE content"]
+    R --> S{"_preflight_recipe_action()"}
+    S -->|确定性工具路由| T["_execute_forced_tool_call()<br/>recipe_query_tool"]
+    S -->|确定性澄清| U["直接 SSE content<br/>要求补充菜名"]
+    S -->|不命中 preflight| V["模型工具循环<br/>recipe_query_tool + web_search_tool"]
 
-    U --> X{"工具名"}
-    X -->|recipe_query_tool| Y["query_recipe_kg(query)"]
-    X -->|web_search_tool| Z["DDGS().text()"]
+    T --> W{"recipe 结果是否需要联网兜底?"}
+    W -->|是| X["_execute_web_fallback_after_recipe()<br/>web_search_tool"]
+    W -->|否| Y["进入最终回答整理"]
+    X --> Y
 
-    Y --> AA["semantic_match_recipe()<br/>alias + TF-IDF + dense + RRF"]
-    AA --> AB["SentenceTransformer<br/>MINICOOK_EMBEDDING_MODEL_DIR 或 models/gte-large-zh"]
-    AB --> AC["RecipeQuerySystem.query(effective_query)<br/>NetworkX 知识图谱"]
-    AC --> AD{"图谱是否未命中且允许联网兜底?"}
-    AD -->|是| AE["_execute_web_fallback_after_recipe()"]
-    AE --> Z
-    AD -->|否| AF["_append_tool_result_to_trace()"]
-    Z --> AF
+    V --> Z{"模型是否调用工具?"}
+    Z -->|结构化 tool_calls| AA["_execute_tool_call()"]
+    Z -->|文本式工具调用| AB["_parse_textual_tool_call()<br/>转真实工具调用"]
+    AB --> AA
+    Z -->|直接回答| AC["SSE content"]
 
-    AF --> AG["_emit_final_answer_from_tool_context()<br/>普通 content-only 模型整理答案"]
-    AG --> AH["SSE trace / rag_step / content"]
-    W --> AH
-    AH --> AI["前端解析 SSE<br/>更新文本、trace、检索过程"]
+    AA --> AD{"工具名"}
+    AD -->|recipe_query_tool| AE["query_recipe_kg(query)"]
+    AD -->|web_search_tool| AF["DDGS().text()"]
+    AE --> AG{"recipe 结果是否需要联网兜底?"}
+    AG -->|是| X
+    AG -->|否| Y
+    AF --> Y
 
-    Q --> AJ["流结束后收集 full_response + rag_trace"]
-    AJ --> AK["add_message(..., ai, rag_trace)<br/>写内存 + chat_messages.rag_trace_json"]
-    AK --> AL["update_context_from_trace()<br/>更新最近菜品/联网摘要"]
-    AL --> AM["update_recipe_context()<br/>写 chat_sessions.recipe_context_json"]
-    AM --> AN["SSE [DONE]"]
+    Y --> AH["_emit_final_answer_from_tool_context()"]
+    AH --> AI{"grounded answer 可用?"}
+    AI -->|反向查询| AJ["_build_grounded_reverse_answer()"]
+    AI -->|联网兜底| AK["_build_grounded_web_fallback_answer()"]
+    AI -->|本地菜谱| AL["_build_grounded_recipe_answer()"]
+    AI -->|不可确定整理| AM["_stream_model_answer()<br/>content-only 模型"]
+    AJ --> AN["SSE trace / token_usage / content"]
+    AK --> AN
+    AL --> AN
+    AM --> AN
+    U --> AN
+    AC --> AN
+
+    AN --> AO["前端解析 SSE<br/>更新文本、trace、检索过程、token"]
+    Q --> AP["流结束后收集 full_response + rag_trace"]
+    AP --> AQ["add_message(..., ai, rag_trace)<br/>写内存 + chat_messages.rag_trace_json"]
+    AQ --> AR["update_context_from_trace()<br/>更新最近菜品/联网摘要"]
+    AR --> AS["update_recipe_context()<br/>写 chat_sessions.recipe_context_json"]
+    AS --> AT["SSE [DONE]"]
 ```
 
 ## 0.1 会话恢复与持久化链路
@@ -123,40 +139,56 @@ data/memory.sqlite3
 ```mermaid
 flowchart TD
     A["stream_search_agent(user_text, history)"] --> B["_runtime_memory_from_history()"]
-    B --> C["_build_tool_loop_messages()"]
-    C --> D["_get_tools()<br/>web_search_tool + recipe_query_tool"]
-    D --> E["_build_tool_loop_system_prompt()"]
-    E --> F["模型工具回合<br/>model.ainvoke(messages)"]
+    A --> C["_build_tool_loop_messages()"]
+    B --> D["_preflight_recipe_action(user_text, history)"]
+    C --> D
 
-    F --> G{"AIMessage 有 tool_calls?"}
-    G -->|有| H["逐个执行 tool_call"]
-    G -->|没有| I["读取 raw_output"]
-    I --> J{"像文本式工具调用?"}
-    J -->|是| K["_parse_textual_tool_call()<br/>转换为真实工具调用"]
-    J -->|否| L["普通文本回答"]
-    K --> H
+    D --> E{"preflight 命中类型"}
+    E -->|反向食材查询| F["强制 recipe_query_tool<br/>原因：只用本地图谱"]
+    E -->|当前输入含明确菜名| G["强制 recipe_query_tool<br/>原因：最新问题覆盖旧上下文"]
+    E -->|裸菜式短语| H["强制 recipe_query_tool<br/>本地先查"]
+    E -->|上下文属性追问| I["用最近菜品补全 query<br/>再强制 recipe_query_tool"]
+    E -->|无菜名属性追问| J["直接澄清<br/>请用户指定菜名"]
+    E -->|未命中| K["进入模型工具循环"]
 
-    H --> M{"工具名"}
-    M -->|recipe_query_tool| N["本地菜谱工具"]
-    M -->|web_search_tool| O["联网搜索工具"]
+    F --> L["_execute_forced_tool_call()"]
+    G --> L
+    H --> L
+    I --> L
+    L --> M{"recipe_query_tool 是否需要联网兜底?"}
+    M -->|是| N["_execute_web_fallback_after_recipe()"]
+    M -->|否| O["_emit_final_answer_from_tool_context()"]
+    N --> O
+    J --> P["SSE content"]
 
-    N --> P{"recipe 结果是否需要联网兜底?"}
-    P -->|是| Q["_execute_web_fallback_after_recipe()"]
-    Q --> O
-    P -->|否| R["进入最终回答整理"]
-    O --> R
-    R --> S["_emit_final_answer_from_tool_context()"]
-    S --> T["_build_final_prompt()<br/>包含 runtime_memory + tool_context"]
-    T --> U["_stream_model_answer()<br/>不再绑定 tools"]
-    U --> V["SSE content"]
-    L --> V
+    K --> Q["_get_tools()<br/>web_search_tool + recipe_query_tool"]
+    Q --> R["_build_tool_loop_system_prompt()"]
+    R --> S["模型工具回合<br/>model.ainvoke(messages)"]
+    S --> T{"AIMessage 有 tool_calls?"}
+    T -->|有| U["逐个执行 tool_call"]
+    T -->|没有| V["读取 raw_output"]
+    V --> W{"像文本式工具调用?"}
+    W -->|是| X["_parse_textual_tool_call()<br/>转换为真实工具调用"]
+    W -->|否| Y["普通文本回答"]
+    X --> U
+    U --> Z{"工具名"}
+    Z -->|recipe_query_tool| AA["本地菜谱工具"]
+    Z -->|web_search_tool| AB["联网搜索工具"]
+    AA --> AC{"recipe 结果是否需要联网兜底?"}
+    AC -->|是| N
+    AC -->|否| O
+    AB --> O
+    Y --> P
+    O --> P
 ```
 
-工具选择规则当前写在 `backend/agent_adapter_local_LLM_harness.py` 的系统提示词中：
+当前 preflight 边界：
 
-- 菜谱、菜式、想吃某道菜、做法、备菜、烹饪、火力、食材、调料、技法、口味、菜系等问题，必须先调用 `recipe_query_tool`。
-- 明显非菜谱问题，如打招呼、天气、模型身份，不调用 `recipe_query_tool`。
-- 只有用户明确要联网、在线、最新信息，或本地图谱未命中且允许公共网页补充时，才调用 `web_search_tool`。
+- “牛肉可以用来做什么菜”：强制 `recipe_query_tool`，只查本地图谱主食材关系。
+- “小炒鸡的具体做法”：如果当前输入包含图谱菜名，强制 `recipe_query_tool`，覆盖旧上下文。
+- “藤条焖猪肉”：裸菜式短语先查本地；本地未命中且允许兜底时再联网。
+- “它蒸多久”：若 session 最近菜品是“清蒸鲈鱼”，补全为“清蒸鲈鱼蒸多久/火力信息”后查工具。
+- “火力要怎么控制”：没有明确菜名且不能可靠指代最近菜品时，直接要求补充菜名。
 
 ## 0.3 runtime memory 注入链路
 
@@ -174,7 +206,7 @@ flowchart TD
     H --> J["build_runtime_memory_context()"]
     I --> J
     J --> K["history.insert({role:'runtime_memory'})"]
-    K --> L["工具循环和最终回答都能看到 runtime memory"]
+    K --> L["preflight、工具循环、最终回答都能看到 runtime memory"]
 ```
 
 runtime memory 包含：
@@ -182,6 +214,7 @@ runtime memory 包含：
 - 用户长期偏好：例如不能吃辣、偏好清淡、没有烤箱。
 - 当前 session 菜谱上下文：最近菜品、最近问题、最近菜谱摘要、最近联网兜底摘要。
 - 使用规则：用户说“它/这道菜/刚才那道菜/这个火候”时，优先指向当前 session 最近菜品。
+- 冲突规则：如果最新工具结果与 runtime memory 冲突，以最新工具结果为准并纠正旧上下文。
 
 ## 0.4 `recipe_query_tool` 内部链路
 
@@ -195,39 +228,46 @@ flowchart TD
     E -->|否| E1["返回知识图谱文件不存在"]
     E -->|是| F["_get_recipe_system()<br/>加载或复用 RecipeQuerySystem"]
 
-    F --> G{"是否反向查询?<br/>哪些菜用了某食材/技法"}
-    G -->|是| H["跳过菜名语义改写"]
-    G -->|否| I["semantic_match_recipe(query)"]
+    F --> G{"是否反向食材查询?<br/>X 可以做什么菜"}
+    G -->|是| H["_query_reverse_ingredient_local()<br/>只扫 USES_MAIN_INGREDIENT 边"]
+    H --> I["返回本地图谱明确命中列表<br/>web_fallback_allowed: False"]
 
-    I --> J["读取 doc/菜谱.xlsx"]
-    J --> K["构建召回文本<br/>菜名/别名/食材/调料/技法/口味/摘要"]
-    K --> L{"backend/.cache/recipe_semantic_index.npz 可用?"}
-    L -->|是| M["读取缓存向量"]
-    L -->|否| N["加载 SentenceTransformer"]
-    N --> O["批量 encode 菜谱文本"]
-    O --> P["保存 npz 缓存"]
-    M --> Q["alias + char ngram TF-IDF + dense"]
-    P --> Q
-    Q --> R["RRF 融合候选"]
-    R --> S{"score 和 margin 达标?"}
-    S -->|是| T["得到标准菜名<br/>生成 effective_query"]
-    S -->|否| H
+    F --> J{"是否普通反向查询?<br/>哪些菜用了某食材/技法"}
+    J -->|是| K["跳过菜名语义改写"]
+    J -->|否| L["semantic_match_recipe(query)"]
 
-    T --> U["RecipeQuerySystem.query(effective_query)"]
-    H --> U
-    U --> V["QueryParser.parse()"]
-    V --> W["QueryExecutor.execute()"]
-    W --> X{"查询类型"}
-    X -->|summary| Y["_query_summary()"]
-    X -->|forward_attr| Z["_query_forward_attribute()"]
-    X -->|forward_rel| AA["_query_forward_relation()"]
-    X -->|reverse| AB["_query_reverse()"]
-    Y --> AC["human_readable + 结构化摘要"]
-    Z --> AC
-    AA --> AC
-    AB --> AC
-    AC --> AD["附加 hybrid retrieval 摘要"]
-    AD --> AE["返回字符串给 Agent"]
+    L --> M["读取 doc/菜谱.xlsx"]
+    M --> N["构建召回文本<br/>菜名/别名/食材/调料/技法/口味/摘要"]
+    N --> O{"backend/.cache/recipe_semantic_index.npz 可用?"}
+    O -->|是| P["读取缓存向量"]
+    O -->|否| Q["加载 SentenceTransformer"]
+    Q --> R["批量 encode 菜谱文本"]
+    R --> S["保存 npz 缓存"]
+    P --> T["alias + char ngram TF-IDF + dense"]
+    S --> T
+    T --> U["RRF 融合候选"]
+    U --> V{"score 和 margin 达标?"}
+    V -->|是| W["得到标准菜名<br/>生成 effective_query"]
+    V -->|否| K
+
+    W --> X["RecipeQuerySystem.query(effective_query)"]
+    K --> X
+    X --> Y["QueryParser.parse()"]
+    Y --> Z["QueryExecutor.execute()"]
+    Z --> AA{"查询类型"}
+    AA -->|summary| AB["_query_summary()"]
+    AA -->|forward_attr| AC["_query_forward_attribute()"]
+    AA -->|forward_rel| AD["_query_forward_relation()"]
+    AA -->|reverse| AE["_query_reverse()"]
+    AB --> AF{"属性命中但内容为空?"}
+    AC --> AF
+    AD --> AF
+    AE --> AG["human_readable + 结构化摘要"]
+    AF -->|是| AH["_fallback_to_summary_when_empty()<br/>退回完整菜谱档案"]
+    AF -->|否| AG
+    AH --> AG
+    AG --> AI["附加 hybrid retrieval 摘要"]
+    AI --> AJ["返回字符串给 Agent"]
 ```
 
 embedding 模型路径：
@@ -250,7 +290,35 @@ backend/.cache/recipe_semantic_index.npz
 - 菜名列表和召回文本。
 - embedding 模型路径。
 
-## 0.5 SSE 回传与前端渲染
+## 0.5 最终回答约束链路
+
+```mermaid
+flowchart TD
+    A["_emit_final_answer_from_tool_context()"] --> B["先发送 trace"]
+    B --> C["发送 rag_step: 正在整理最终回答"]
+    C --> D{"是否可确定性整理?"}
+    D -->|反向食材查询| E["_build_grounded_reverse_answer()"]
+    D -->|本地未命中 + web 搜索| F["_build_grounded_web_fallback_answer()"]
+    D -->|本地菜谱命中| G["_build_grounded_recipe_answer()"]
+    D -->|都不可用| H["_build_final_prompt()"]
+    H --> I["_stream_model_answer()<br/>不绑定 tools"]
+    I --> J{"模型是否失败或超时?"}
+    J -->|是| K["_build_partial_tool_answer()<br/>工具结果兜底摘要"]
+    J -->|否| L["SSE content"]
+    E --> L
+    F --> L
+    G --> L
+    K --> L
+```
+
+约束重点：
+
+- 反向查询答案只能来自工具返回的本地图谱命中列表。
+- 本地菜谱命中时，最终回答必须基于图谱用料、步骤、火力、提示整理。
+- 本地未命中但联网兜底时，必须明确说明“本地图谱未收录”，再列公开网页摘要；不能说成“根据本地菜谱图谱”。
+- 如果搜索工具失败或无结果，回答必须说明无法凭常识编做法。
+
+## 0.6 SSE 回传与前端渲染
 
 ```mermaid
 flowchart TD
@@ -259,24 +327,27 @@ flowchart TD
     B -->|trace| D["完整 rag_trace"]
     B -->|thinking| E["模型思考片段"]
     B -->|content| F["最终回答片段"]
-    B -->|session_title| G["更新会话标题"]
-    B -->|error| H["错误信息"]
-    B -->|DONE| I["结束流"]
+    B -->|token_usage| G["token 用量"]
+    B -->|session_title| H["更新会话标题"]
+    B -->|error| I["错误信息"]
+    B -->|DONE| J["结束流"]
 
-    C --> J["chatStore.handleSend()<br/>解析 SSE"]
-    D --> J
-    E --> J
-    F --> J
-    G --> J
-    H --> J
-    J --> K{"前端按 type 分发"}
-    K -->|rag_step| L["追加 msg.ragSteps<br/>并分组折叠"]
-    K -->|trace| M["写入 msg.ragTrace"]
-    K -->|thinking| N["追加到过程展示"]
-    K -->|content| O["追加 assistant 正文"]
-    K -->|session_title| P["更新 sessions 列表"]
-    K -->|error| Q["展示 Error 文本"]
-    I --> R["isLoading=false<br/>abortController=null"]
+    C --> K["chatStore.handleSend()<br/>解析 SSE"]
+    D --> K
+    E --> K
+    F --> K
+    G --> K
+    H --> K
+    I --> K
+    K --> L{"前端按 type 分发"}
+    L -->|rag_step| M["追加 msg.ragSteps<br/>并分组折叠"]
+    L -->|trace| N["写入 msg.ragTrace"]
+    L -->|thinking| O["追加到过程展示"]
+    L -->|content| P["追加 assistant 正文"]
+    L -->|token_usage| Q["更新 TokenUsageBadge"]
+    L -->|session_title| R["更新 sessions 列表"]
+    L -->|error| S["展示 Error 文本"]
+    J --> T["isLoading=false<br/>abortController=null"]
 ```
 
 ## 1. 前端发送消息
@@ -285,6 +356,7 @@ flowchart TD
 
 ```text
 frontend/src/stores/chat.ts
+frontend/src/components/Chat/ChatInput.vue
 ```
 
 `handleSend()` 的关键动作：
@@ -304,7 +376,7 @@ fetch('/chat/stream', {
 })
 ```
 
-5. 循环读取 SSE，根据 `type` 更新正文、trace、检索过程和标题。
+5. 循环读取 SSE，根据 `type` 更新正文、trace、检索过程、token 用量和标题。
 
 历史会话恢复走：
 
@@ -402,13 +474,16 @@ backend/agent_adapter_local_LLM_harness.py
 stream_search_agent(user_text, history)
 ```
 
-模型每轮都会拿到：
+`stream_search_agent()` 的当前顺序：
 
-- 系统提示词。
-- 当前注册工具 schema。
-- 历史消息。
-- 历史工具调用和工具结果。
-- runtime memory。
+1. 初始化 `rag_trace` 和 `TokenUsageTracker`。
+2. 从 history 解析 runtime memory。
+3. 构造工具循环 messages。
+4. 发送 `rag_step`: 正在装载工具上下文。
+5. 先执行 `_preflight_recipe_action(user_text, history)`。
+6. 如果 preflight 返回澄清文本，直接输出 content 并结束。
+7. 如果 preflight 返回工具路由，强制执行 `recipe_query_tool`，必要时自动执行 `web_search_tool`，再进入最终回答整理。
+8. 如果 preflight 未命中，才进入原来的模型工具循环。
 
 当前注册工具：
 
@@ -421,11 +496,12 @@ web_search_tool
 
 ## 5. 菜谱工具与混合召回
 
-当前 `recipe_query_tool` 不只是简单查图谱，而是一个组合工具：
+当前 `recipe_query_tool` 是一个组合工具：
 
 ```text
 recipe_query_tool
   -> query_recipe_kg
+  -> 反向食材确定性查询
   -> semantic_match_recipe
      -> alias
      -> char_ngram_tfidf
@@ -433,11 +509,15 @@ recipe_query_tool
      -> RRF fusion
   -> RecipeQuerySystem.query
   -> NetworkX 知识图谱精查
+  -> 空属性结果退回完整菜谱档案
 ```
 
-对于“辣椒炒肉怎么做”“我想吃清蒸鲈鱼”这类菜式问题，提示词要求模型必须先调用 `recipe_query_tool`，不能直接凭常识回答。
+对于“辣椒炒肉怎么做”“我想吃清蒸鲈鱼”“小炒鸡具体做法”这类菜式问题，现在有两层保障：
 
-对于“哪些菜用了包菜”这类反向查询，`query_recipe_kg()` 会跳过菜名语义改写，避免把食材误召回成一道菜。
+1. preflight 识别明确菜名或裸菜式短语，直接强制 `recipe_query_tool`。
+2. 未命中 preflight 时，系统提示词仍要求模型必须先调用 `recipe_query_tool`。
+
+对于“牛肉可以用来做什么菜”这类反向食材查询，`query_recipe_kg()` 不让模型自由发挥，也不走联网搜索，而是扫描知识图谱中 `USES_MAIN_INGREDIENT` 边，只返回明确命中的菜。
 
 ## 6. 联网兜底
 
@@ -455,29 +535,35 @@ recipe_query_tool 返回结果
 边界：
 
 - 本地图谱明确给出相似菜品时，不联网。
+- 反向食材查询不联网，只列本地图谱明确命中的菜。
 - 明显非菜谱问题，不因为历史上下文误触发菜谱工具。
 - 只有本地图谱未命中且允许公共网页补充，或者用户明确要求联网，才使用 `web_search_tool`。
 
 ## 7. 最终回答生成
 
-工具执行完后，不再继续让绑定 tools 的模型生成最终答案，而是切到普通 content-only 模型：
+工具执行完后，不再继续让绑定 tools 的模型生成最终答案，而是进入：
 
 ```text
 _emit_final_answer_from_tool_context()
-  -> _build_final_prompt(user_text, trace, tool_context, runtime_memory)
-  -> _stream_model_answer()
 ```
 
-这样可以避免模型在最终回答阶段再次输出工具调用文本。
+当前优先级：
 
-最终回答提示词会包含：
+```text
+_build_grounded_reverse_answer()
+  -> _build_grounded_web_fallback_answer()
+  -> _build_grounded_recipe_answer()
+  -> _build_final_prompt()
+  -> _stream_model_answer()
+  -> 失败时 _build_partial_tool_answer()
+```
 
-- 用户原问题。
-- 工具上下文。
-- `rag_trace`。
-- runtime memory。
+这样可以避免几类问题：
 
-如果最终回答模型超时或失败，会退回到工具结果兜底摘要。
+- 工具已经命中，但最终回答说没找到。
+- 本地未命中后，模型把联网摘要包装成“本地图谱菜谱”。
+- 反向查询时模型补充本地图谱没有的菜。
+- 最终回答阶段再次输出工具调用文本。
 
 ## 8. 一条完整链路概览
 
@@ -500,29 +586,33 @@ ChatInput.vue
      -> 长期偏好
      -> session recipe_context
   -> stream_search_agent(user_text, history)
+  -> _runtime_memory_from_history()
   -> _build_tool_loop_messages()
-  -> get_tool_bound_model()
-  -> model.ainvoke(messages)
-  -> tool_calls 或文本式工具调用
-  -> _execute_tool_call()
-     -> recipe_query_tool(query)
-        -> query_recipe_kg(query)
-        -> semantic_match_recipe()
-           -> alias + TF-IDF + dense + RRF
-           -> SentenceTransformer(MINICOOK_EMBEDDING_MODEL_DIR 或 models/gte-large-zh)
-           -> backend/.cache/recipe_semantic_index.npz
-           -> 标准菜名 / effective_query
-        -> RecipeQuerySystem.query(effective_query)
-        -> QueryParser.parse()
-        -> QueryExecutor.execute()
-        -> human_readable + 结构化摘要 + hybrid retrieval 摘要
-     -> 或 web_search_tool(query)
-        -> DDGS().text()
-  -> _append_tool_result_to_trace()
+  -> _preflight_recipe_action()
+     -> 可能强制 recipe_query_tool
+     -> 可能直接要求补充菜名
+     -> 可能放行给模型工具循环
+  -> recipe_query_tool(query)
+     -> query_recipe_kg(query)
+     -> 反向食材本地图谱查询
+     -> semantic_match_recipe()
+        -> alias + TF-IDF + dense + RRF
+        -> SentenceTransformer(MINICOOK_EMBEDDING_MODEL_DIR 或 models/gte-large-zh)
+        -> backend/.cache/recipe_semantic_index.npz
+        -> 标准菜名 / effective_query
+     -> RecipeQuerySystem.query(effective_query)
+     -> QueryParser.parse()
+     -> QueryExecutor.execute()
+     -> human_readable + 结构化摘要 + hybrid retrieval 摘要
+     -> 必要时空属性结果退回完整档案
   -> 必要时 _execute_web_fallback_after_recipe()
+     -> web_search_tool(user_text)
+     -> DDGS().text()
   -> _emit_final_answer_from_tool_context()
-  -> SSE: rag_step / trace / content / error / DONE
-  -> frontend 更新 assistant 消息、trace、检索过程
+     -> 优先 deterministic grounded answer
+     -> 必要时 content-only 模型整理
+  -> SSE: rag_step / trace / token_usage / content / error / DONE
+  -> frontend 更新 assistant 消息、trace、检索过程、token 展示
   -> add_message(..., "ai", full_response, rag_trace)
      -> chat_messages.rag_trace_json
   -> update_context_from_trace()
@@ -535,43 +625,77 @@ ChatInput.vue
 用户输入：
 
 ```text
-我想吃清蒸鲈鱼
+牛肉可以用来做什么菜
 ```
 
 当前链路：
 
 ```text
-前端发送 message + session_id
-  -> 后端恢复或创建 session
-  -> 用户消息写入 SQLite
-  -> 偏好提取
-  -> 注入 runtime memory
-  -> 模型判断这是菜式问题
-  -> 必须调用 recipe_query_tool
-  -> semantic_match_recipe("我想吃清蒸鲈鱼")
-  -> hybrid retrieval 找到标准菜名：清蒸鲈鱼
-  -> RecipeQuerySystem.query("清蒸鲈鱼")
-  -> 图谱返回做法/火力/备菜等结构化资料
-  -> 最终回答模型整理自然语言答案
-  -> SSE 推送给前端
-  -> assistant 回复 + rag_trace 落库
-  -> session recipe_context 更新 last_dish=清蒸鲈鱼
+stream_search_agent()
+  -> _preflight_recipe_action()
+  -> 命中反向食材查询
+  -> 强制 recipe_query_tool
+  -> query_recipe_kg()
+  -> _query_reverse_ingredient_local()
+  -> 扫描 USES_MAIN_INGREDIENT 边
+  -> 返回本地图谱明确命中的牛肉菜
+  -> _build_grounded_reverse_answer()
+  -> 最终回答只列本地图谱结果，不联网，不补常识
 ```
 
-下一轮用户问：
+用户输入：
 
 ```text
-它蒸多久？
+火力要怎么控制
 ```
 
-链路变化：
+当前链路：
 
 ```text
-get_session(session_id)
-  -> 恢复上一轮 recipe_context
-  -> runtime memory 注入最近菜品：清蒸鲈鱼
-  -> 模型将“它”解析为清蒸鲈鱼
-  -> 再次调用 recipe_query_tool 查询蒸制时间/火力信息
+stream_search_agent()
+  -> _preflight_recipe_action()
+  -> 命中无菜名属性追问
+  -> 直接回答：请先告诉我要查询哪道菜的火力控制
+  -> 不调用 recipe_query_tool
+  -> 不调用 web_search_tool
 ```
 
-这就是当前版本的核心变化：**不再只有一次性 RAG，而是把工具结果、偏好、菜谱上下文和会话历史一起持久化并投影给模型。**
+用户输入：
+
+```text
+小炒鸡的具体做法
+```
+
+当前链路：
+
+```text
+stream_search_agent()
+  -> _preflight_recipe_action()
+  -> 当前输入含明确菜名：小炒鸡
+  -> 强制 recipe_query_tool，覆盖旧上下文
+  -> query_recipe_kg("小炒鸡的具体做法")
+  -> 属性结果若为空，退回完整档案查询
+  -> _build_grounded_recipe_answer()
+  -> 按本地图谱用料、步骤、火力整理答案
+```
+
+用户输入：
+
+```text
+藤条焖猪肉
+```
+
+当前链路：
+
+```text
+stream_search_agent()
+  -> _preflight_recipe_action()
+  -> 裸菜式短语先查本地
+  -> recipe_query_tool 未命中，且 web_fallback_allowed: True
+  -> 自动执行 web_search_tool
+  -> _build_grounded_web_fallback_answer()
+  -> 明确说明本地图谱未收录，再列联网摘要
+  -> 不把它伪装成本地菜谱
+```
+
+这就是当前版本的核心变化：**菜谱问题不再完全依赖模型自觉 tool_call，而是先用后端确定性路由兜住关键边界，再用工具循环和 grounded 最终回答把“查到什么”和“能说什么”绑在一起。**
