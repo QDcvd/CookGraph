@@ -39,10 +39,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // 代理后端接口，方便开发联调
-      '/auth': 'http://localhost:8000',
-      '/chat': 'http://localhost:8000',
-      '/sessions': 'http://localhost:8000',
-      '/documents': 'http://localhost:8000',
+      '/auth': 'http://127.0.0.1:8000',
+      '/chat': 'http://127.0.0.1:8000',
+      '/sessions': 'http://127.0.0.1:8000',
+      '/documents': 'http://127.0.0.1:8000',
     },
   },
 });
