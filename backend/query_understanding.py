@@ -184,17 +184,23 @@ def classify_intent(
                 reason=f"别名命中: {matched}",
             )
 
-    # 4. 明确反向模式
+    # 4. “想做某道菜，问材料/调味/配菜”是单菜谱属性请求。
+    # 这类问题可能包含“哪些调味料”，但不是“哪些菜用了某食材”的反向查询。
+    forward_attr = _classify_forward_attribute_request(normalized)
+    if forward_attr:
+        return forward_attr
+
+    # 5. 明确反向模式
     reverse_result = _classify_reverse_pattern(normalized, raw, kg_system=kg_system)
     if reverse_result:
         return reverse_result
 
-    # 5. “实体 + 怎么做”只有在实体能精确归并到图谱节点时才算反向。
+    # 6. “实体 + 怎么做”只有在实体能精确归并到图谱节点时才算反向。
     entity_how_to = _classify_entity_how_to(normalized, kg_system=kg_system)
     if entity_how_to:
         return entity_how_to
 
-    # 6. 歧义词
+    # 7. 歧义词
     if normalized in AMBIGUOUS_TERMS:
         candidates = AMBIGUOUS_TERMS[normalized]
         return QueryIntent(
@@ -204,12 +210,12 @@ def classify_intent(
             reason=f"多类型歧义词: {normalized}",
         )
 
-    # 7. 短词命中实体。必须是整句短词，不允许从未知菜名中截子串。
+    # 8. 短词命中实体。必须是整句短词，不允许从未知菜名中截子串。
     short_result = _classify_short_term(normalized, kg_system=kg_system)
     if short_result:
         return short_result
 
-    # 8. 正向未知单菜谱。比如“红烧排骨怎么做”“麻婆豆腐”。
+    # 9. 正向未知单菜谱。比如“红烧排骨怎么做”“麻婆豆腐”。
     if _looks_like_unknown_single_recipe(normalized):
         return QueryIntent(
             intent="forward_unknown_recipe_query",
@@ -217,7 +223,7 @@ def classify_intent(
             reason="像单道菜谱查询，但未命中本地图谱菜名/别名",
         )
 
-    # 9. 其余 → 旧 parser
+    # 10. 其余 → 旧 parser
     return QueryIntent(
         intent="legacy_forward_parser",
         confidence=0.3,
@@ -350,6 +356,29 @@ def _has_cooking_markers(text: str) -> bool:
     """检查文本是否包含烹饪/做法关键词。"""
     markers = ["怎么做", "做法", "如何做", "烹饪", "怎么做好吃"]
     return any(m in text for m in markers)
+
+
+def _classify_forward_attribute_request(text: str) -> QueryIntent | None:
+    """识别“想做某道菜，问调味料/配菜/材料”的未知单菜谱属性请求。"""
+    if not re.search(r"(?:我想做|想做|要做|准备做|学做)", text):
+        return None
+    attribute_markers = [
+        "需要准备",
+        "准备哪些",
+        "调味料",
+        "调料",
+        "配菜",
+        "食材",
+        "材料",
+        "用料",
+    ]
+    if not any(marker in text for marker in attribute_markers):
+        return None
+    return QueryIntent(
+        intent="forward_unknown_recipe_query",
+        confidence=0.72,
+        reason="单菜谱属性请求，但未命中本地图谱菜名/别名",
+    )
 
 
 def _looks_like_unknown_single_recipe(text: str) -> bool:
@@ -520,18 +549,18 @@ def _classify_short_term(
 def format_ambiguous_query(intent: QueryIntent) -> str:
     """将歧义意图格式化为结构化的工具输出。"""
     if not intent.candidates:
-        return "菜谱查询未执行：查询存在歧义。\n\n结构化摘要：\nsuccess: False\nintent: ambiguous\nweb_fallback_allowed: False"
+        return "我有点不确定你想查哪一种含义，可以再补充一句吗？\n\n结构化摘要：\nsuccess: False\nintent: ambiguous\nweb_fallback_allowed: False"
 
     lines = [
-        "菜谱查询未执行：查询存在歧义。",
+        "我有点不确定你想查哪一种含义，可以帮我确认一下吗？",
         "",
         "候选解释：",
     ]
     for c in intent.candidates:
-        lines.append(f"- 如果查「{c['target_text']}」作为{c['target_type']}：请补充说明。")
+        lines.append(f"- 「{c['target_text']}」作为{c['target_type']}")
     lines.extend([
         "",
-        "说明：未执行任何图谱查询，请用户明确后再查。",
+        "你确认后，我再按对应方向帮你查。",
         "",
         "结构化摘要：",
         "success: False",
@@ -545,7 +574,7 @@ def format_ambiguous_query(intent: QueryIntent) -> str:
 def format_non_recipe(text: str) -> str:
     """非菜谱问题格式化输出。"""
     return (
-        f"菜谱查询未执行：当前问题不是菜谱查询。\n\n"
+        "这个问题看起来不像菜谱查询，我先不查本地菜谱图谱。\n\n"
         "结构化摘要：\n"
         "success: False\n"
         "match_mode: none\n"

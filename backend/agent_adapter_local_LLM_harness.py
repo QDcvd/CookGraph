@@ -171,11 +171,12 @@ def get_model() -> ChatOpenAI:
 
 def _build_tool_loop_system_prompt(tools: list[Any]) -> str:
     return (
-        "你是迷你烹饪问答机器人，一个会使用工具的中文助手。你的主要任务是帮助用户查找、阅读和总结烹饪、菜谱、菜单与项目文件相关信息。\n"
+        "你是迷你烹饪问答机器人，一个亲切、靠谱、说话自然的中文厨房助手。你的主要任务是帮助用户查找、阅读和总结烹饪、菜谱、菜单与项目文件相关信息。\n"
         f"{_build_tool_inventory_prompt(tools)}\n\n"
         "工具调用协议：\n"
         "- 运行时已经把上面的工具作为结构化 tools schema 传给模型；需要工具时必须发起正式 tool_call，不要在文字里假装调用。\n"
         "- 当前使用 /no_think 模式，请不要输出隐藏推理过程，把 token 留给工具调用和最终答案。\n"
+        "- 回答用户时保持亲切、自然、简洁；遇到未命中、缺少信息或需要追问时，不要用系统错误口吻，先说明你理解用户想做什么，再说明当前限制，并给出下一步选择。\n"
         "- 如果用户明确点名某个工具，就调用该工具。\n"
         "- 工具名必须使用精确注册名：recipe_query_tool 或 web_search_tool；不要输出 recipe_query、recipe、search 等不存在的别名。\n"
         "- 如果用户的输入像是在询问某道菜、某个菜式、想吃某道菜，或询问菜谱、菜品做法、怎么做、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，或问“哪些菜用了某食材/技法”，必须先调用 recipe_query_tool；不要直接凭常识回答，也不要先调用 web_search_tool。\n"
@@ -331,20 +332,81 @@ def _contextual_recipe_query(user_text: str, history: list[dict]) -> str | None:
     return None
 
 
+def _looks_like_affirmative_web_search_reply(user_text: str) -> bool:
+    text = re.sub(r"\s+", "", str(user_text or "").lower())
+    if not text:
+        return False
+    exact_replies = {"是", "是的", "对", "好的", "好", "可以", "行", "要", "嗯", "帮我搜", "搜一下", "查一下"}
+    if text in exact_replies:
+        return True
+    return any(marker in text for marker in ["帮我搜", "网上搜", "联网搜", "搜一下", "查一下"])
+
+
+def _message_role(item: dict) -> str:
+    return str(item.get("role") or item.get("type") or "").lower()
+
+
+def _message_content(item: dict) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                value = part.get("text") or part.get("content")
+                if value:
+                    parts.append(str(value))
+            elif part:
+                parts.append(str(part))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _pending_web_search_query_from_history(history: list[dict]) -> str | None:
+    for index in range(len(history) - 1, -1, -1):
+        item = history[index]
+        role = _message_role(item)
+        content = _message_content(item)
+        if role not in {"ai", "assistant"}:
+            continue
+        if "需要我帮你到网上搜一下吗" not in content and "需要我帮你联网搜索" not in content:
+            continue
+        for prev_index in range(index - 1, -1, -1):
+            prev = history[prev_index]
+            prev_role = _message_role(prev)
+            if prev_role not in {"human", "user"}:
+                continue
+            query = _message_content(prev).strip()
+            if query:
+                return query
+    return None
+
+
 def _clarification_for_contextless_recipe_attr(user_text: str) -> str | None:
     text = re.sub(r"\s+", "", str(user_text or ""))
     if not text or _contains_current_dish_name(text):
         return None
     if any(marker in text for marker in ["火力", "火候"]):
-        return "请先告诉我要查询哪道菜的火力控制。"
+        return "可以的，你先告诉我是哪道菜，我再帮你查它的火力控制。"
     if text in {"注意事项", "注意点", "提示", "要点"}:
-        return "请先告诉我要查询哪道菜的注意事项。"
+        return "可以的，你先告诉我是哪道菜，我再帮你查它的注意事项。"
     if text in {"调料", "调料呢", "配料", "配料呢", "用料", "材料"}:
-        return "请先告诉我要查询哪道菜的用料或调料。"
+        return "可以的，你先告诉我是哪道菜，我再帮你查它的用料或调料。"
     return None
 
 
 def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None:
+    if _looks_like_affirmative_web_search_reply(user_text):
+        pending_web_query = _pending_web_search_query_from_history(history)
+        if pending_web_query:
+            return {
+                "type": "tool",
+                "tool_name": "web_search_tool",
+                "query": pending_web_query,
+                "reason": "用户确认联网搜索上一轮问题",
+            }
+
     if _looks_like_graph_dish_count_question(user_text):
         return {"type": "tool", "query": user_text, "reason": "本地图谱菜品数量统计"}
 
@@ -426,6 +488,14 @@ async def _emit_final_answer_from_tool_context(
     """工具执行完成后，用不绑定 tools 的普通模型整理最终回答。"""
     yield {"type": "trace", "rag_trace": trace}
     yield {"type": "rag_step", "step": {"label": "正在整理最终回答...", "icon": "✍️"}}
+    grounded_web_offer_answer = _build_grounded_web_search_offer_answer(tool_context)
+    if grounded_web_offer_answer:
+        yield {"type": "content", "content": grounded_web_offer_answer}
+        if token_tracker is not None:
+            trace["token_usage"] = token_tracker.snapshot(final=True)
+            yield {"type": "token_usage", "token_usage": trace["token_usage"]}
+        return
+
     grounded_reverse_answer = _build_grounded_reverse_answer(tool_context)
     if grounded_reverse_answer:
         yield {"type": "content", "content": grounded_reverse_answer}
@@ -786,6 +856,17 @@ def _build_grounded_reverse_answer(tool_context: list[dict]) -> str:
     return ""
 
 
+def _build_grounded_web_search_offer_answer(tool_context: list[dict]) -> str:
+    for item in reversed(tool_context):
+        if item.get("tool_name") != "recipe_query_tool":
+            continue
+        content = str(item.get("content") or "")
+        if "web_search_offer: True" not in content:
+            continue
+        return content.split("结构化摘要：", 1)[0].strip()
+    return ""
+
+
 def _build_grounded_web_fallback_answer(user_text: str, tool_context: list[dict]) -> str:
     recipe_miss = False
     web_content = ""
@@ -803,7 +884,7 @@ def _build_grounded_web_fallback_answer(user_text: str, tool_context: list[dict]
     lines = [f"本地菜谱图谱未收录“{user_text}”。"]
     if "网络搜索失败" in web_content or "网络搜索没有返回内容" in web_content:
         lines.append(f"已尝试联网搜索，但搜索工具没有返回可用结果：{web_content.strip()}")
-        lines.append("因此我不能把它当成本地图谱菜谱，也不会凭常识编做法。")
+        lines.append("为了不误导你，我不会凭常识硬编做法。可以换个菜名再查，或者稍后再让我联网试一次。")
         return "\n".join(lines)
 
     lines.append("以下是联网搜索返回的公开网页摘要，建议核对来源后再使用：")
@@ -989,14 +1070,14 @@ def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict], r
     context = "\n\n".join(context_lines) or "没有收集到工具上下文。"
 
     system = (
-        "你是迷你烹饪问答机器人，一个简洁的中文助手。请只输出给用户看的最终回答。"
+        "你是迷你烹饪问答机器人，一个亲切、靠谱、说话自然的中文厨房助手。请只输出给用户看的最终回答。"
         "不要复述内部搜索步骤、工具调用过程、失败模式或原始日志。"
         "如果找到了菜谱图谱或网页信息，只能根据已收集的工具上下文回答。"
         "不得新增工具上下文中没有出现的步骤、食材、调料、用量、时间、火力档位或温度。"
         "不得把工具给出的精确时间改写成更宽泛的范围；例如工具写8分钟，就不要写8-10分钟。"
         "如果工具上下文给出了 cooking_method_desc、fire_control_process、配料或调味品，必须优先保留这些字段里的事实。"
         "如果最新工具上下文与历史回答或先验冲突，必须以最新工具上下文为准并明确纠正旧说法。"
-        "如果上下文不足，请简短说明还缺少什么。"
+        "如果上下文不足，请用温和语气简短说明还缺少什么，并给用户一个清晰的下一步选择。"
     )
     user = (
         f"用户问题：\n{user_text}\n\n"
@@ -1004,7 +1085,7 @@ def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict], r
         f"已收集的工具上下文：\n{context}\n\n"
         f"检索摘要：\n"
         f"- 已用工具：{[call.get('tool_name') for call in trace.get('tool_calls', [])]}\n"
-        "请用中文写出干净、直接的最终回答。回答前自检：每一个步骤、时间、用量、调料都必须能在工具上下文中找到依据。"
+        "请用中文写出亲切、干净、直接的最终回答。回答前自检：每一个步骤、时间、用量、调料都必须能在工具上下文中找到依据。"
     )
     return [SystemMessage(content=system), HumanMessage(content=_with_no_think(user))]
 
@@ -1107,10 +1188,10 @@ def _build_direct_chat_prompt(user_text: str, history: list[dict]) -> list[Any]:
     messages: list[Any] = [
         SystemMessage(
             content=(
-                "你是迷你烹饪问答机器人，一个简洁的中文助手。请直接回答用户。"
+                "你是迷你烹饪问答机器人，一个亲切、自然的中文厨房助手。请直接回答用户。"
                 "不要提及工具调用、内部分析或隐藏推理。"
                 "如果用户在问某道菜怎么做、想吃某道菜、菜谱、配料、火候、烹饪步骤或食材做法，"
-                "你不能凭常识编菜谱；只能回复：这个问题需要调用菜谱工具，请重新发送或稍后再试。"
+                "你不能凭常识编菜谱；只能温和回复：这个问题需要先查菜谱工具，请重新发送或稍后再试。"
             )
         )
     ]
@@ -1201,10 +1282,11 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                     return
 
                 query = str(preflight.get("query") or user_text)
+                tool_name = str(preflight.get("tool_name") or "recipe_query_tool")
                 yield {
                     "type": "rag_step",
                     "step": {
-                        "label": "确定性菜谱路由：recipe_query_tool",
+                        "label": f"确定性工具路由：{tool_name}",
                         "icon": "🧭",
                         "detail": f"{preflight.get('reason')}: {query}",
                     },
@@ -1214,7 +1296,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                     messages,
                     trace,
                     tool_context,
-                    "recipe_query_tool",
+                    tool_name,
                     {"query": query},
                     "preflight_recipe_route",
                 )

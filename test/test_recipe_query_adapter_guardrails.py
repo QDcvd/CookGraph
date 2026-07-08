@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from backend.agent_adapter_local_LLM_harness import stream_search_agent
+from backend.agent_adapter_local_LLM_harness import _preflight_recipe_action, stream_search_agent
 from backend.recipe_query_adapter import query_recipe_kg
 
 
@@ -129,6 +129,15 @@ class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
                 self.assertIn("web_fallback_allowed: True", result)
                 self.assertNotIn("【本地图谱反向查询结果】", result)
 
+    def test_unknown_recipe_attribute_request_offers_web_search(self):
+        result = query_recipe_kg("我想做十豆炖鸡，需要准备哪些调味料和配菜?")
+
+        self.assertIn("需要我帮你到网上搜一下吗", result)
+        self.assertIn("web_search_offer: True", result)
+        self.assertIn("web_fallback_allowed: False", result)
+        self.assertNotIn("【本地图谱反向查询结果】", result)
+        self.assertNotIn("查询维度：口味", result)
+
     def test_graph_dish_count_meta_query_returns_count(self):
         result = query_recipe_kg("告诉我你现在菜谱一共收录了多少菜")
 
@@ -139,6 +148,22 @@ class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
 
 
 class AgentPreflightGuardrailTests(unittest.TestCase):
+    def test_affirmative_after_web_offer_routes_original_query_to_web_search(self):
+        original = "我想做十豆炖鸡，需要准备哪些调味料和配菜?"
+        history = [
+            {"role": "human", "content": original},
+            {
+                "role": "ai",
+                "content": "由于当前查询未能在本地图谱节点中稳定匹配到“十豆炖鸡”的相关信息，因此无法提供具体的调味料和配菜列表。需要我帮你到网上搜一下吗？",
+            },
+        ]
+
+        preflight = _preflight_recipe_action("是", history)
+
+        self.assertIsNotNone(preflight)
+        self.assertEqual(preflight.get("tool_name"), "web_search_tool")
+        self.assertEqual(preflight.get("query"), original)
+
     def test_alias_dish_fire_attribute_routes_to_recipe_tool(self):
         async def run():
             events = []
@@ -167,7 +192,8 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
         trace = next((event.get("rag_trace") for event in events if event.get("type") == "trace"), {})
         tool_calls = trace.get("tool_calls", []) if isinstance(trace, dict) else []
 
-        self.assertIn("请先告诉我要查询哪道菜", content)
+        self.assertIn("是哪道菜", content)
+        self.assertIn("火力控制", content)
         self.assertEqual(tool_calls, [])
 
     def test_graph_dish_count_routes_to_recipe_tool(self):

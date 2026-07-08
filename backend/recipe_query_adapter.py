@@ -269,6 +269,8 @@ def _looks_like_non_recipe_query(query: str) -> bool:
 def _looks_like_single_recipe_query(query: str) -> bool:
     """Whether a miss can reasonably fall back to web search as one dish."""
     text = _normalize_query_text(query)
+    if _looks_like_forward_attribute_request(text):
+        return True
     if not text or _looks_like_non_recipe_query(text) or _looks_like_reverse_recipe_query(text):
         return False
 
@@ -315,7 +317,7 @@ def _looks_like_single_recipe_query(query: str) -> bool:
 def _format_intent_rejection(query: str, reason: str) -> str:
     """Return a structured tool result that will not trigger web fallback."""
     return (
-        f"菜谱查询未执行：{reason}\n\n"
+        f"我先不查本地菜谱图谱：{reason}\n\n"
         "结构化摘要：\n"
         "success: False\n"
         "match_mode: none\n"
@@ -356,7 +358,7 @@ def _format_graph_dish_count(system: Any) -> str:
 def _format_forward_unknown_miss(query: str, reason: str, semantic_note: str | None = None) -> str:
     """Stable result for a single-recipe miss that should trigger web fallback."""
     output = (
-        "菜谱查询未命中：本地图谱未收录这道菜，建议进入联网搜索。\n"
+        "我在本地菜谱图谱里暂时没找到这道菜，可以继续帮你联网搜索。\n"
         f"原始问题：{query}\n"
         f"未命中原因：{reason}\n\n"
         "结构化摘要：\n"
@@ -364,6 +366,48 @@ def _format_forward_unknown_miss(query: str, reason: str, semantic_note: str | N
         "intent: forward_recipe_query\n"
         "match_mode: none\n"
         "web_fallback_allowed: True"
+    )
+    if semantic_note:
+        output += "\n\n语义召回摘要：\n" + semantic_note
+    return output
+
+
+def _looks_like_forward_attribute_request(query: str) -> bool:
+    text = _normalize_query_text(query)
+    if not re.search(r"(?:我想做|想做|要做|准备做|学做)", text):
+        return False
+    attribute_markers = [
+        "需要准备",
+        "准备哪些",
+        "调味料",
+        "调料",
+        "配菜",
+        "食材",
+        "材料",
+        "用料",
+    ]
+    return any(marker in text for marker in attribute_markers)
+
+
+def _extract_forward_attribute_dish(query: str) -> str:
+    text = _normalize_query_text(query)
+    match = re.search(r"(?:我想做|想做|要做|准备做|学做)(?P<dish>[\u4e00-\u9fff]{2,16}?)(?:需要|要|，|,|。|？|\?|$)", text)
+    if match:
+        return match.group("dish").strip()
+    return _normalize_query_text(query).strip(" ？?。！!")
+
+
+def _format_forward_unknown_offer(query: str, semantic_note: str | None = None) -> str:
+    dish = _extract_forward_attribute_dish(query) or query
+    output = (
+        f"由于当前查询未能在本地图谱节点中稳定匹配到“{dish}”的相关信息，"
+        "因此无法提供具体的调味料和配菜列表。需要我帮你到网上搜一下吗？\n\n"
+        "结构化摘要：\n"
+        "success: False\n"
+        "intent: forward_recipe_query\n"
+        "match_mode: none\n"
+        "web_search_offer: True\n"
+        "web_fallback_allowed: False"
     )
     if semantic_note:
         output += "\n\n语义召回摘要：\n" + semantic_note
@@ -754,7 +798,7 @@ def execute_reverse_query(system: Any, intent: QueryIntent) -> str:
     raw_value = str(intent.target_text or intent.normalized_text or "").strip()
     if not spec or not raw_value:
         return (
-            "菜谱查询未执行：反向查询缺少明确的查询维度或实体。\n\n"
+            "我还没判断清楚你想按哪种维度查菜，可以再具体一点吗？\n\n"
             "结构化摘要：\n"
             "success: False\n"
             "intent: ambiguous\n"
@@ -765,7 +809,7 @@ def execute_reverse_query(system: Any, intent: QueryIntent) -> str:
     aliases, resolved_value, match_mode = _resolve_reverse_entity(system, kind, raw_value)
     if not aliases:
         return (
-            "菜谱查询未执行：未能在本地图谱节点中稳定匹配该反向查询对象。\n"
+            "我暂时没在本地菜谱图谱里找到稳定匹配的对象。\n"
             f"查询维度：{spec['display']}\n"
             f"原始对象：{raw_value}\n"
             f"匹配说明：{match_mode}\n\n"
@@ -1104,6 +1148,9 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
             "本地图谱只给出了包含用户明确排除食材的相似菜品，不能当作当前菜谱命中。",
             semantic_note,
         )
+
+    if forward_unknown and _looks_like_forward_attribute_request(text) and not _result_is_success(result):
+        return _format_forward_unknown_offer(text, semantic_note)
 
     if (
         semantic_match is not None

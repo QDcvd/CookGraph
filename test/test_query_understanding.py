@@ -47,6 +47,12 @@ class TestClassifyIntent(unittest.TestCase):
                 intent = self._classify(query)
                 self.assertEqual(intent.intent, "forward_unknown_recipe_query", query)
 
+    def test_unknown_recipe_attribute_request_is_not_reverse_query(self):
+        """想做某道菜并询问调味/配菜，应按单菜谱属性请求处理。"""
+        intent = self._classify("我想做十豆炖鸡，需要准备哪些调味料和配菜?")
+        self.assertEqual(intent.intent, "forward_unknown_recipe_query")
+        self.assertNotEqual(intent.target_type, "taste")
+
     def test_reverse_ingredient_query(self):
         """食材反向 -> reverse_query / ingredient"""
         for query in ["牛肉怎么做", "虾怎么做", "莲藕怎么做好吃"]:
