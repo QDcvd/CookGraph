@@ -64,3 +64,4 @@ doc/mmdc-puppeteer-config.json
 backend-error.log
 #
 " "
+unpacked_resume/

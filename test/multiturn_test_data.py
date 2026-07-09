@@ -148,9 +148,10 @@ MULTITURN_TEST_CASES: list[dict[str, Any]] = [
         description="从真实对话抽取：疑似错字菜名必须先追问确认，不能直接编答案或联网",
         expected_behavior=(
             "第一轮十豆炖鸡应识别为疑似错字，追问是否指土豆炖鸡；"
-            "第二轮用户确认后，必须用纠错后的土豆炖鸡查询本地图谱或后续兜底流程"
+            "第二轮用户确认后，必须用纠错后的土豆炖鸡查询本地图谱或后续兜底流程；"
+            "第三轮用户确认联网后，必须继承土豆炖鸡原问题调用 web_search_tool"
         ),
-        forbidden_behavior="未确认前直接把十豆炖鸡当作真实菜谱回答，或把弱相关搜索摘要拼成答案",
+        forbidden_behavior="未确认前直接把十豆炖鸡当作真实菜谱回答，或确认联网时把短回复“是”当成搜索词",
         turns=[
             dict(
                 user="我想做十豆炖鸡，需要准备哪些调味料和配菜?",
@@ -166,42 +167,42 @@ MULTITURN_TEST_CASES: list[dict[str, Any]] = [
             ),
             dict(
                 choose_option="A",
-                expected_action="tool",
-                resolves_pending=True,
-                expect_tools=["recipe_query_tool"],
-                expect_any_keywords=["土豆炖鸡"],
-                forbid_keywords=["虫草", "莲藕猪蹄", "猪蹄", "猪脚", "红枣", "干香菇"],
-            ),
-        ],
-    ),
-    dict(
-        id="memory_008",
-        category="memory",
-        description="本地未收录的明确菜谱先请求联网确认，用户同意后用上一轮原问题联网",
-        expected_behavior=(
-            "第一轮凉拌牛肉先查本地图谱，未命中时只询问是否联网；"
-            "第二轮用户说搜一下，必须继承上一轮原始问题调用 web_search_tool"
-        ),
-        forbidden_behavior="确认前直接联网，或确认后忘记上一轮凉拌牛肉问题",
-        turns=[
-            dict(
-                user="凉拌牛肉怎么做",
                 expected_action="offer_web_search",
+                resolves_pending=True,
                 expect_tools=["recipe_query_tool"],
                 expect_offer_web_search=True,
                 expect_choice_prompt=True,
                 expect_choice_type="web_search_confirm",
                 expect_choice_options=["A", "B", "C"],
-                expect_no_web_before_confirmation=True,
-                forbid_tools=["web_search_tool"],
-                expect_any_keywords=["凉拌牛肉"],
+                expect_any_keywords=["土豆炖鸡"],
+                forbid_keywords=["虫草", "莲藕猪蹄", "猪蹄", "猪脚", "红枣", "干香菇"],
             ),
             dict(
                 choose_option="A",
                 expected_action="tool",
                 resolves_pending=True,
                 expect_tools=["web_search_tool"],
+                expect_any_keywords=["土豆炖鸡"],
+                forbid_keywords=["搜索结果：是", "query': '是'", '"query": "是"', "是枝裕和"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_008",
+        category="memory",
+        description="本地未收录的明确单菜谱自动联网，不能停在本地图谱未命中",
+        expected_behavior=(
+            "凉拌牛肉是明确单菜谱问题；本地图谱未命中后，应自动调用 web_search_tool，"
+            "并围绕凉拌牛肉整理参考做法"
+        ),
+        forbidden_behavior="只停留在本地图谱未命中提示，或把凉拌牛肉模糊成小炒黄牛肉等本地菜",
+        turns=[
+            dict(
+                user="凉拌牛肉怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
                 expect_any_keywords=["凉拌牛肉"],
+                forbid_keywords=["小炒黄牛肉可以这样做", "根据本地菜谱图谱，小炒黄牛肉"],
             ),
         ],
     ),

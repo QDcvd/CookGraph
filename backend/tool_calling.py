@@ -328,7 +328,7 @@ def _parse_recipe_hybrid_retrieval(content: str) -> dict[str, Any] | None:
         elif value is not None:
             payload[key] = value
 
-    if "standard_dish" not in payload and "top" in payload:
+    if accepted and "standard_dish" not in payload and "top" in payload:
         payload["standard_dish"] = payload["top"]
 
     return payload

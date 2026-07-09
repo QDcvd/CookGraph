@@ -366,6 +366,25 @@ def _find_matched_text(query: str, dish_name: str, document: str) -> str | None:
     return None
 
 
+def _is_unsafe_partial_dish_match(query: str, dish_name: str, matched_text: str | None) -> bool:
+    """Reject rewriting an unknown compound dish from a short ingredient fragment."""
+    if not matched_text:
+        return False
+    normalized_query = _normalize_text(query)
+    normalized_match = _normalize_text(matched_text)
+    normalized_dish = _normalize_text(dish_name)
+    if normalized_match == normalized_dish:
+        return False
+    if len(normalized_match) >= 4:
+        return False
+    action_markers = ("炒", "炖", "焖", "蒸", "煮", "炸", "煎", "烤", "拌", "煲")
+    if not any(marker in normalized_query for marker in action_markers):
+        return False
+    if normalized_query == normalized_match:
+        return False
+    return True
+
+
 def rewrite_query_with_dish(original_query: str, dish_name: str, matched_text: str | None = None) -> str:
     """只做菜名归一，不硬编码用户意图。
 
@@ -416,6 +435,8 @@ def semantic_match_recipe(
     accepted = best_score >= min_score and margin >= min_margin
     document_by_name = dict(zip(names, documents))
     matched_text = _find_matched_text(text, best_name, document_by_name.get(best_name, ""))
+    if accepted and _is_unsafe_partial_dish_match(text, best_name, matched_text):
+        accepted = False
     rewritten_query = rewrite_query_with_dish(text, best_name, matched_text)
 
     dense_debug = ", ".join(f"{name}:{score:.3f}" for name, score in dense[:3])

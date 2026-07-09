@@ -10,6 +10,7 @@ from backend.agent_adapter_local_LLM_harness import (
     stream_search_agent,
 )
 from backend.recipe_query_adapter import query_recipe_kg
+from backend.tool_calling import _append_tool_result_to_trace
 
 
 class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
@@ -145,8 +146,7 @@ class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
         result = query_recipe_kg("凉拌牛肉怎么做")
 
         self.assertIn("success: False", result)
-        self.assertIn("web_search_offer: True", result)
-        self.assertIn("web_fallback_allowed: False", result)
+        self.assertIn("web_fallback_allowed: True", result)
         self.assertNotIn("根据本地菜谱图谱，小炒黄牛肉可以这样做", result)
 
     def test_unknown_single_recipe_misses_allow_web_fallback(self):
@@ -165,6 +165,15 @@ class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
         self.assertIn("web_fallback_allowed: False", result)
         self.assertNotIn("【本地图谱反向查询结果】", result)
         self.assertNotIn("查询维度：口味", result)
+
+    def test_unknown_compound_dish_does_not_rewrite_from_short_ingredient_fragment(self):
+        result = query_recipe_kg("土豆炖鸡")
+
+        self.assertIn("success: False", result)
+        self.assertIn("web_fallback_allowed: True", result)
+        self.assertIn("混合召回未改写", result)
+        self.assertNotIn("【清炒土豆丝 完整档案】", result)
+        self.assertNotIn("清炒土豆丝可以这样做", result)
 
     def test_bare_potato_query_groups_main_and_auxiliary_ingredient_matches(self):
         result = query_recipe_kg("土豆")
@@ -205,6 +214,36 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
             {
                 "role": "ai",
                 "content": "由于当前查询未能在本地图谱节点中稳定匹配到“十豆炖鸡”的相关信息，因此无法提供具体的调味料和配菜列表。需要我帮你到网上搜一下吗？",
+            },
+        ]
+
+        preflight = _preflight_recipe_action("是", history)
+
+        self.assertIsNotNone(preflight)
+        self.assertEqual(preflight.get("tool_name"), "web_search_tool")
+        self.assertEqual(preflight.get("query"), original)
+
+    def test_affirmative_after_trace_web_offer_uses_recipe_tool_query_not_short_reply(self):
+        original = "我想做土豆炖鸡，需要准备哪些调味料和配菜?"
+        history = [
+            {"role": "human", "content": "是"},
+            {
+                "role": "assistant",
+                "content": "由于当前查询未能在本地图谱节点中稳定匹配到“土豆炖鸡”的相关信息，因此无法提供具体的调味料和配菜列表。需要我帮你到网上搜一下吗？",
+                "rag_trace": {
+                    "tool_calls": [
+                        {
+                            "tool_name": "recipe_query_tool",
+                            "args": {"query": original},
+                            "output_preview": (
+                                "结构化摘要：\n"
+                                "success: False\n"
+                                "web_search_offer: True\n"
+                                "web_fallback_allowed: False"
+                            ),
+                        }
+                    ]
+                },
             },
         ]
 
@@ -260,11 +299,13 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
 
         events = asyncio.run(run())
         trace = next((event.get("rag_trace") for event in events if event.get("type") == "trace"), {})
-        choice_prompt = trace.get("choice_prompt") if isinstance(trace, dict) else {}
+        tool_calls = trace.get("tool_calls", []) if isinstance(trace, dict) else []
+        tool_names = [item.get("tool_name") for item in tool_calls]
 
-        self.assertEqual(choice_prompt.get("type"), "web_search_confirm")
-        self.assertEqual(choice_prompt.get("pending_payload", {}).get("original_query"), "凉拌牛肉怎么做")
-        self.assertEqual(choice_prompt.get("options", [])[0].get("send_text"), "是")
+        self.assertIn("recipe_query_tool", tool_names)
+        self.assertIn("web_search_tool", tool_names)
+        self.assertEqual(tool_calls[-1].get("args", {}).get("query"), "凉拌牛肉怎么做")
+        self.assertIsNone(trace.get("choice_prompt"))
 
     def test_contextual_attribute_followup_runs_before_clarification_gate(self):
         history = [
@@ -568,6 +609,24 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
 
         self.assertIn("香辣鸡肉怎么做", web_queries)
         self.assertNotIn("具体做法", web_queries)
+
+    def test_trace_does_not_promote_unaccepted_semantic_top_to_standard_dish(self):
+        trace = {"tool_calls": [], "retrieved_chunks": []}
+        content = (
+            "❌ 未找到菜品\"土豆炖鸡\"。\n\n"
+            "结构化摘要：\n"
+            "success: False\n"
+            "web_fallback_allowed: True\n\n"
+            "语义召回摘要：\n"
+            "混合召回未改写：top=清炒土豆丝 score=0.049 margin=0.001；候选：清炒土豆丝(0.049)"
+        )
+
+        _append_tool_result_to_trace(trace, "recipe_query_tool", {"query": "土豆炖鸡"}, content)
+
+        hybrid = trace.get("hybrid_retrieval") or {}
+        self.assertFalse(hybrid.get("accepted"))
+        self.assertEqual(hybrid.get("top"), "清炒土豆丝")
+        self.assertNotIn("standard_dish", hybrid)
 
 
 if __name__ == "__main__":

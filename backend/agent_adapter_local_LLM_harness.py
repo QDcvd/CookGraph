@@ -462,6 +462,13 @@ def _pending_recipe_web_search_from_history(history: list[dict]) -> dict | None:
     if "需要我帮你到网上搜一下吗" not in content and "需要我帮你联网搜索" not in content:
         return None
     recipe_miss = _recipe_web_search_offer_from_message(item)
+    trace_query = _recipe_web_search_offer_query_from_message(item)
+    if trace_query:
+        return {
+            "type": "recipe_web_search_offer",
+            "original_query": trace_query,
+            "recipe_miss_content": recipe_miss or content,
+        }
     for prev in reversed(items[:-1]):
         prev_role = _message_role(prev)
         if prev_role not in {"human", "user"}:
@@ -474,6 +481,23 @@ def _pending_recipe_web_search_from_history(history: list[dict]) -> dict | None:
                 "recipe_miss_content": recipe_miss or content,
             }
     return None
+
+
+def _recipe_web_search_offer_query_from_message(item: dict) -> str:
+    trace = item.get("rag_trace") if isinstance(item.get("rag_trace"), dict) else {}
+    for call in reversed(trace.get("tool_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        if str(call.get("tool_name") or call.get("name")) != "recipe_query_tool":
+            continue
+        output = str(call.get("output_preview") or "")
+        if "web_search_offer: True" not in output:
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        query = str(args.get("query") or "").strip()
+        if query:
+            return query
+    return ""
 
 
 def _recipe_web_search_offer_from_message(item: dict) -> str:
