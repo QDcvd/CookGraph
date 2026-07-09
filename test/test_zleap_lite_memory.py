@@ -106,6 +106,60 @@ class SessionRecipeContextTests(unittest.TestCase):
         self.assertEqual(context["last_web_fallback_query"], "北京烤鸭怎么做")
         self.assertIn("搜索结果", context["last_web_fallback_summary"])
 
+    def test_records_and_clears_pending_recipe_web_search_offer(self):
+        offer_trace = {
+            "tool_calls": [
+                {
+                    "tool_name": "recipe_query_tool",
+                    "args": {"query": "我想做十豆炖鸡，需要准备哪些调味料和配菜?"},
+                    "output_preview": (
+                        "由于当前查询未能在本地图谱节点中稳定匹配到“十豆炖鸡”的相关信息。需要我帮你到网上搜一下吗？\n\n"
+                        "结构化摘要：\n"
+                        "success: False\n"
+                        "web_search_offer: True\n"
+                        "web_fallback_allowed: False"
+                    ),
+                }
+            ],
+        }
+
+        context = update_context_from_trace(empty_recipe_context(), "我想做十豆炖鸡，需要准备哪些调味料和配菜?", offer_trace)
+
+        pending = context["pending_recipe_web_search"]
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["original_query"], "我想做十豆炖鸡，需要准备哪些调味料和配菜?")
+
+        web_trace = {
+            "tool_calls": [
+                {
+                    "tool_name": "web_search_tool",
+                    "args": {"query": pending["original_query"]},
+                    "output_preview": "搜索结果：我想做十豆炖鸡，需要准备哪些调味料和配菜?",
+                }
+            ],
+        }
+        context = update_context_from_trace(context, "搜一下", web_trace)
+
+        self.assertIsNone(context["pending_recipe_web_search"])
+
+    def test_records_and_renders_pending_clarification(self):
+        trace = {
+            "pending_clarification": {
+                "type": "uncertain_dish_name",
+                "payload": {
+                    "original_query": "我想做十豆炖鸡，需要准备哪些调味料和配菜?",
+                    "suggested_query": "我想做土豆炖鸡，需要准备哪些调味料和配菜?",
+                },
+            },
+            "tool_calls": [],
+        }
+
+        context = update_context_from_trace(empty_recipe_context(), "我想做十豆炖鸡，需要准备哪些调味料和配菜?", trace)
+
+        self.assertEqual(context["pending_clarification"]["type"], "uncertain_dish_name")
+        text = build_runtime_memory_context(recipe_context=context)
+        self.assertIn("待澄清菜谱问题(uncertain_dish_name)", text)
+
 
 class RuntimeMemoryRenderTests(unittest.TestCase):
     def test_renders_runtime_memory_block(self):

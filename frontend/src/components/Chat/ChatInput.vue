@@ -37,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick } from 'vue';
+import { ref, nextTick, watch } from 'vue';
 import { useChatStore } from '@/stores/chat';
 
 const chatStore = useChatStore();
@@ -71,6 +71,14 @@ const resetTextareaHeight = () => {
     textareaRef.value.style.height = 'auto';
   }
 };
+
+watch(
+  () => chatStore.focusInputRequestedAt,
+  async () => {
+    await nextTick();
+    textareaRef.value?.focus();
+  }
+);
 
 const onSend = async () => {
   const text = chatStore.userInput.trim();

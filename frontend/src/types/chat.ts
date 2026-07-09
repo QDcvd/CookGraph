@@ -9,6 +9,7 @@ export interface RetrievedChunk {
 export interface RagTrace {
   tool_used?: boolean;
   tool_name?: string;
+  choice_prompt?: ChoicePrompt | null;
   hybrid_retrieval?: {
     strategy?: string;
     accepted?: boolean;
@@ -100,6 +101,22 @@ export interface TokenUsage {
   model_rounds?: number;
 }
 
+export interface ChoicePromptOption {
+  key: 'A' | 'B' | 'C' | string;
+  label: string;
+  send_text?: string;
+  custom?: boolean;
+}
+
+export interface ChoicePrompt {
+  id: string;
+  type: string;
+  question: string;
+  options: ChoicePromptOption[];
+  pending_type?: string;
+  pending_payload?: Record<string, unknown>;
+}
+
 export interface Message {
   text: string;
   isUser: boolean;
@@ -108,6 +125,8 @@ export interface Message {
   ragSteps?: RagStep[];
   _groupedSteps?: GroupedRagStep[];
   tokenUsage?: TokenUsage | null;
+  choicePrompt?: ChoicePrompt | null;
+  selectedChoiceKey?: string | null;
 }
 
 export interface ChatSession {

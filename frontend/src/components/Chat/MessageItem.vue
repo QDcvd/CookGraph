@@ -33,6 +33,11 @@
             :msg-index="msgIndex" 
             @cite-click="onCiteClick"
           />
+          <ChoicePromptCard
+            v-if="msg.choicePrompt"
+            :msg="msg"
+            :msg-index="msgIndex"
+          />
           <TokenUsageBadge :usage="msg.tokenUsage" />
         </section>
 
@@ -54,6 +59,7 @@ import ThinkingTrace from './ThinkingTrace.vue';
 import References from './References.vue';
 import RetrievalTraceDetails from './RetrievalTraceDetails.vue';
 import TokenUsageBadge from './TokenUsageBadge.vue';
+import ChoicePromptCard from './ChoicePromptCard.vue';
 import type { Message } from '@/types/chat';
 
 const props = defineProps<{

@@ -14,6 +14,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from backend.answer_composer import compose_plan_result
+from backend.query_executor import execute_query_plan, node_names_by_type
+from backend.query_plan import build_query_plan
 from backend.query_understanding import (
     QueryIntent,
     classify_intent,
@@ -412,6 +415,56 @@ def _format_forward_unknown_offer(query: str, semantic_note: str | None = None) 
     if semantic_note:
         output += "\n\n语义召回摘要：\n" + semantic_note
     return output
+
+
+TECHNIQUE_CONFLICT_GROUPS = {
+    "凉拌": {"凉拌", "拌"},
+    "拌": {"凉拌", "拌"},
+    "小炒": {"小炒", "炒", "爆炒"},
+    "爆炒": {"爆炒", "炒", "小炒"},
+    "清蒸": {"清蒸", "蒸", "蒸制"},
+    "蒸": {"清蒸", "蒸", "蒸制"},
+    "炖": {"炖", "焖"},
+    "红烧": {"红烧", "烧"},
+    "白灼": {"白灼"},
+}
+
+
+def _query_technique_terms(query: str) -> set[str]:
+    text = _normalize_query_text(query)
+    return {term for term in TECHNIQUE_CONFLICT_GROUPS if term in text}
+
+
+def _result_technique_text(result: dict) -> str:
+    parts: list[str] = []
+    for key in ("human_readable", "value", "dish_name"):
+        value = result.get(key)
+        if value:
+            parts.append(str(value))
+    structured = result.get("structured")
+    if isinstance(structured, dict):
+        parts.append(json.dumps(structured, ensure_ascii=False))
+    dish = result.get("dish")
+    if isinstance(dish, dict):
+        parts.append(json.dumps(dish, ensure_ascii=False))
+    return _normalize_query_text("\n".join(parts))
+
+
+def _result_conflicts_query_technique(query: str, result: dict) -> bool:
+    query_terms = _query_technique_terms(query)
+    if not query_terms:
+        return False
+    result_text = _result_technique_text(result)
+    if not result_text:
+        return False
+    result_terms = {term for term in TECHNIQUE_CONFLICT_GROUPS if term in result_text}
+    if not result_terms:
+        return False
+    for query_term in query_terms:
+        allowed = TECHNIQUE_CONFLICT_GROUPS.get(query_term, {query_term})
+        if result_terms & allowed:
+            return False
+    return True
 
 
 def _excluded_food_terms(query: str) -> list[str]:
@@ -1095,6 +1148,11 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
     if is_graph_dish_count_query:
         return _format_graph_dish_count(system)
 
+    node_names = node_names_by_type(system)
+    plan = build_query_plan(text, node_names_by_type=node_names, dish_names=_kg_dish_names(system))
+    if plan.supported:
+        return compose_plan_result(execute_query_plan(plan, system))
+
     # ── Query Understanding 层 ──
     dish_names = _kg_dish_names(system)
     intent = classify_intent(text, dish_names=dish_names, kg_system=system)
@@ -1140,6 +1198,19 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
         forward_unknown
         and _result_is_success(result)
         and str(result.get("match_mode") or "").lower() == "fuzzy"
+        and _result_conflicts_query_technique(text, result)
+        and not (semantic_match is not None and semantic_match.accepted and semantic_match.matched_text)
+    ):
+        return _format_forward_unknown_offer(
+            text,
+            (semantic_note + "；" if semantic_note else "")
+            + "本地图谱 fuzzy 候选与用户显式烹饪技法不一致，不能当作当前菜谱命中。",
+        )
+
+    if (
+        forward_unknown
+        and _result_is_success(result)
+        and str(result.get("match_mode") or "").lower() == "fuzzy"
         and _result_mentions_any(result, _excluded_food_terms(text))
         and not (semantic_match is not None and semantic_match.accepted and semantic_match.matched_text)
     ):
@@ -1174,6 +1245,18 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
             result = fallback_result
             fallback_note = "图谱自校正：属性查询命中但内容为空，已退回完整档案查询。"
             semantic_note = f"{semantic_note}；{fallback_note}" if semantic_note else fallback_note
+
+    if (
+        forward_unknown
+        and _result_is_success(result)
+        and _result_conflicts_query_technique(text, result)
+        and not (semantic_match is not None and semantic_match.accepted and semantic_match.matched_text and semantic_match.dish_name in text)
+    ):
+        return _format_forward_unknown_offer(
+            text,
+            (semantic_note + "；" if semantic_note else "")
+            + "本地图谱候选菜与用户显式烹饪技法不一致，不能当作当前菜谱命中。",
+        )
 
     # 优先取 human_readable
     human = result.get("human_readable")

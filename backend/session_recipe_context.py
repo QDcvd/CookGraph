@@ -17,6 +17,8 @@ def empty_recipe_context() -> dict:
         "last_recipe_tool_result_summary": None,
         "last_web_fallback_query": None,
         "last_web_fallback_summary": None,
+        "pending_recipe_web_search": None,
+        "pending_clarification": None,
         "last_tool_names": [],
         "updated_at": None,
     }
@@ -25,6 +27,12 @@ def empty_recipe_context() -> dict:
 def update_context_from_trace(existing: dict | None, user_text: str, rag_trace: dict | None) -> dict:
     context = {**empty_recipe_context(), **(existing or {})}
     if not isinstance(rag_trace, dict):
+        return context
+
+    pending_clarification = rag_trace.get("pending_clarification")
+    if isinstance(pending_clarification, dict):
+        context["pending_clarification"] = pending_clarification
+        context["updated_at"] = datetime.now().isoformat()
         return context
 
     tool_calls = [call for call in rag_trace.get("tool_calls") or [] if isinstance(call, dict)]
@@ -39,12 +47,23 @@ def update_context_from_trace(existing: dict | None, user_text: str, rag_trace: 
 
     if recipe_calls:
         latest_recipe = recipe_calls[-1]
+        args = latest_recipe.get("args") if isinstance(latest_recipe.get("args"), dict) else {}
         output = str(latest_recipe.get("output_preview") or "")
         dish = _dish_from_trace_or_output(rag_trace, output)
         if dish and _recipe_result_is_success(output):
             context["last_dish"] = dish
             context["last_query"] = user_text
             context["last_recipe_tool_result_summary"] = _summarize(output)
+            context["pending_recipe_web_search"] = None
+            context["pending_clarification"] = None
+            context["updated_at"] = datetime.now().isoformat()
+        elif _recipe_result_is_web_search_offer(output):
+            context["pending_recipe_web_search"] = {
+                "type": "recipe_web_search_offer",
+                "original_query": str(args.get("query") or user_text),
+                "recipe_miss_summary": _summarize(output),
+                "created_at": datetime.now().isoformat(),
+            }
             context["updated_at"] = datetime.now().isoformat()
 
     if web_calls:
@@ -53,6 +72,8 @@ def update_context_from_trace(existing: dict | None, user_text: str, rag_trace: 
         output = str(latest_web.get("output_preview") or "")
         context["last_web_fallback_query"] = str(args.get("query") or user_text)
         context["last_web_fallback_summary"] = _summarize(output)
+        context["pending_recipe_web_search"] = None
+        context["pending_clarification"] = None
         context["updated_at"] = datetime.now().isoformat()
 
     return context
@@ -72,6 +93,16 @@ def render_recipe_context(context: dict | None) -> str:
         lines.append(f"- 最近联网兜底问题：{context['last_web_fallback_query']}")
     if context.get("last_web_fallback_summary"):
         lines.append(f"- 最近联网摘要：{context['last_web_fallback_summary']}")
+    pending = context.get("pending_recipe_web_search") if isinstance(context.get("pending_recipe_web_search"), dict) else None
+    if pending and pending.get("original_query"):
+        lines.append(f"- 待确认联网菜谱问题：{pending['original_query']}")
+    clarification = context.get("pending_clarification") if isinstance(context.get("pending_clarification"), dict) else None
+    if clarification:
+        pending_type = str(clarification.get("type") or "")
+        payload = clarification.get("payload") if isinstance(clarification.get("payload"), dict) else {}
+        original_query = str(payload.get("original_query") or "").strip()
+        if original_query:
+            lines.append(f"- 待澄清菜谱问题({pending_type})：{original_query}")
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
@@ -102,6 +133,11 @@ def _recipe_result_is_success(output: str) -> bool:
     if "完整档案" in text or "为您找到相似菜品" in text or "标准菜名=" in text:
         return True
     return bool(text.strip()) and "未找到菜品" not in text and "无法理解的查询格式" not in text
+
+
+def _recipe_result_is_web_search_offer(output: str) -> bool:
+    text = str(output or "")
+    return "success: False" in text and "web_search_offer: True" in text
 
 
 def _summarize(text: str, limit: int = SUMMARY_CHARS) -> str:

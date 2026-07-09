@@ -11,6 +11,7 @@ export const useChatStore = defineStore('chat', {
     activeNav: 'newChat' as 'newChat' | 'history' | 'settings',
     sessionId: 'session_' + Date.now(),
     abortController: null as AbortController | null,
+    focusInputRequestedAt: 0,
   }),
 
   actions: {
@@ -82,6 +83,8 @@ export const useChatStore = defineStore('chat', {
           isUser: msg.type === 'human',
           ragTrace: msg.rag_trace || null,
           tokenUsage: msg.rag_trace?.token_usage || null,
+          choicePrompt: msg.rag_trace?.choice_prompt || null,
+          selectedChoiceKey: null,
         }));
       } catch (error: any) {
         const errMsg = error.response?.data?.detail || error.message || '加载会话失败';
@@ -94,6 +97,39 @@ export const useChatStore = defineStore('chat', {
       if (this.abortController) {
         this.abortController.abort();
       }
+    },
+
+    requestInputFocus() {
+      this.focusInputRequestedAt = Date.now();
+    },
+
+    async choosePromptOption(msgIndex: number, optionKey: string) {
+      const msg = this.messages[msgIndex];
+      if (!msg || msg.isUser || !msg.choicePrompt || msg.selectedChoiceKey || this.isLoading) return;
+
+      const latestAssistantIndex = [...this.messages]
+        .map((item, index) => ({ item, index }))
+        .reverse()
+        .find(({ item }) => !item.isUser)?.index;
+      if (latestAssistantIndex !== msgIndex) return;
+
+      const option = msg.choicePrompt.options.find((item) => String(item.key) === String(optionKey));
+      if (!option) return;
+
+      msg.selectedChoiceKey = option.key;
+      if (option.custom) {
+        this.requestInputFocus();
+        return;
+      }
+
+      const sendText = (option.send_text || '').trim();
+      if (!sendText) {
+        this.requestInputFocus();
+        return;
+      }
+
+      this.userInput = sendText;
+      await this.handleSend();
     },
 
     async handleSend() {
@@ -131,6 +167,8 @@ export const useChatStore = defineStore('chat', {
         ragSteps: [],
         _groupedSteps: [],
         tokenUsage: null,
+        choicePrompt: null,
+        selectedChoiceKey: null,
       });
       const botMsgIdx = this.messages.length - 1;
 
@@ -189,6 +227,7 @@ export const useChatStore = defineStore('chat', {
                 } else if (data.type === 'trace') {
                   this.messages[botMsgIdx].ragTrace = data.rag_trace;
                   this.messages[botMsgIdx].tokenUsage = data.rag_trace?.token_usage || this.messages[botMsgIdx].tokenUsage || null;
+                  this.messages[botMsgIdx].choicePrompt = data.rag_trace?.choice_prompt || null;
                 } else if (data.type === 'token_usage') {
                   this.messages[botMsgIdx].tokenUsage = data.token_usage;
                   if (this.messages[botMsgIdx].ragTrace) {

@@ -18,10 +18,16 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Sys
 from langchain_openai import ChatOpenAI
 
 from backend.agent_tools import _get_tools
+from backend.answer_composer import compose_web_recipe_answer
 from backend.context_manager import (
     context_followup_tool_call,
     history_context_summary,
     recent_context_paths,
+)
+from backend.clarification_gate import (
+    build_choice_prompt,
+    build_web_search_choice_prompt,
+    decide_clarification,
 )
 from backend.recipe_query_adapter import kg_dish_names
 from backend.token_usage_tracker import TokenUsageTracker
@@ -231,9 +237,56 @@ def _last_dish_from_history(history: list[dict]) -> str:
         trace = item.get("rag_trace")
         if not isinstance(trace, dict):
             continue
+        tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
+        recipe_success = False
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            if str(call.get("tool_name") or call.get("name")) != "recipe_query_tool":
+                continue
+            output = str(call.get("output_preview") or "")
+            if "success: False" not in output and "web_fallback_allowed: True" not in output:
+                recipe_success = True
+                break
+        if not recipe_success:
+            continue
         hybrid = trace.get("hybrid_retrieval")
         if isinstance(hybrid, dict) and hybrid.get("standard_dish"):
             return str(hybrid.get("standard_dish")).strip()
+    return ""
+
+
+def _extract_recipe_topic(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    quoted = re.search(r"[“\"]([^”\"]{2,20})[”\"]", raw)
+    if quoted:
+        raw = quoted.group(1)
+    text = re.sub(r"\s+", "", raw)
+    text = re.sub(r"^(?:我想做|想做|要做|准备做|学做|告诉我|请问|帮我查)", "", text)
+    text = re.sub(r"(?:怎么做|的做法|做法|主要难点是什么|火力如何|火候如何|需要准备.*|需要什么.*|的火力.*|烹饪提示)$", "", text)
+    text = text.strip(" ，。？！?,!")
+    return text if 2 <= len(text) <= 16 else ""
+
+
+def _last_web_recipe_topic_from_history(history: list[dict]) -> str:
+    for item in reversed(history or []):
+        trace = item.get("rag_trace") if isinstance(item, dict) else None
+        if isinstance(trace, dict):
+            for call in reversed(trace.get("tool_calls") or []):
+                if not isinstance(call, dict):
+                    continue
+                if str(call.get("tool_name") or call.get("name")) != "web_search_tool":
+                    continue
+                args = call.get("args") if isinstance(call.get("args"), dict) else {}
+                topic = _extract_recipe_topic(str(args.get("query") or ""))
+                if topic:
+                    return topic
+        content = _message_content(item) if isinstance(item, dict) else ""
+        topic = _extract_recipe_topic(content)
+        if topic and ("本地菜谱图谱没有收录" in content or "联网搜索" in content):
+            return topic
     return ""
 
 
@@ -332,6 +385,35 @@ def _contextual_recipe_query(user_text: str, history: list[dict]) -> str | None:
     return None
 
 
+def _contextual_recipe_action(user_text: str, history: list[dict]) -> dict | None:
+    contextual_query = _contextual_recipe_query(user_text, history)
+    if contextual_query:
+        return {"type": "tool", "query": contextual_query, "reason": "根据当前会话最近菜品补全属性追问"}
+
+    text = re.sub(r"\s+", "", str(user_text or ""))
+    topic = _last_web_recipe_topic_from_history(history)
+    if not topic:
+        return None
+    if any(marker in text for marker in ["火力", "火候"]):
+        return {
+            "type": "tool",
+            "tool_name": "web_search_tool",
+            "query": f"{topic} 火力 火候 难点",
+            "answer_user_text": f"{topic}的火力和火候难点",
+            "reason": "上一轮是联网兜底菜，属性追问继续联网查询",
+        }
+    if any(marker in text for marker in ["难点", "注意事项", "注意点", "提示", "要点", "为什么"]):
+        return {
+            "type": "tool",
+            "tool_name": "web_search_tool",
+            "query": f"{topic} 做法 难点 注意事项",
+            "answer_user_text": f"{topic}的主要难点",
+            "reason": "上一轮是联网兜底菜，属性追问继续联网查询",
+        }
+    return None
+
+
+
 def _looks_like_affirmative_web_search_reply(user_text: str) -> bool:
     text = re.sub(r"\s+", "", str(user_text or "").lower())
     if not text:
@@ -364,6 +446,11 @@ def _message_content(item: dict) -> str:
 
 
 def _pending_web_search_query_from_history(history: list[dict]) -> str | None:
+    pending = _pending_recipe_web_search_from_history(history)
+    return str(pending.get("original_query") or "").strip() if pending else None
+
+
+def _pending_recipe_web_search_from_history(history: list[dict]) -> dict | None:
     for index in range(len(history) - 1, -1, -1):
         item = history[index]
         role = _message_role(item)
@@ -372,6 +459,7 @@ def _pending_web_search_query_from_history(history: list[dict]) -> str | None:
             continue
         if "需要我帮你到网上搜一下吗" not in content and "需要我帮你联网搜索" not in content:
             continue
+        recipe_miss = _recipe_web_search_offer_from_message(item)
         for prev_index in range(index - 1, -1, -1):
             prev = history[prev_index]
             prev_role = _message_role(prev)
@@ -379,8 +467,26 @@ def _pending_web_search_query_from_history(history: list[dict]) -> str | None:
                 continue
             query = _message_content(prev).strip()
             if query:
-                return query
+                return {
+                    "type": "recipe_web_search_offer",
+                    "original_query": query,
+                    "recipe_miss_content": recipe_miss or content,
+                }
     return None
+
+
+def _recipe_web_search_offer_from_message(item: dict) -> str:
+    trace = item.get("rag_trace") if isinstance(item.get("rag_trace"), dict) else {}
+    for call in reversed(trace.get("tool_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        if str(call.get("tool_name") or call.get("name")) != "recipe_query_tool":
+            continue
+        output = str(call.get("output_preview") or "")
+        if "web_search_offer: True" in output:
+            return output
+    content = _message_content(item)
+    return content if "web_search_offer: True" in content or "需要我帮你到网上搜一下吗" in content else ""
 
 
 def _clarification_for_contextless_recipe_attr(user_text: str) -> str | None:
@@ -398,14 +504,47 @@ def _clarification_for_contextless_recipe_attr(user_text: str) -> str | None:
 
 def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None:
     if _looks_like_affirmative_web_search_reply(user_text):
-        pending_web_query = _pending_web_search_query_from_history(history)
-        if pending_web_query:
+        pending_web = _pending_recipe_web_search_from_history(history)
+        if pending_web:
             return {
                 "type": "tool",
                 "tool_name": "web_search_tool",
-                "query": pending_web_query,
+                "query": pending_web["original_query"],
                 "reason": "用户确认联网搜索上一轮问题",
+                "pending_recipe_web_search": pending_web,
             }
+
+    contextual_action = _contextual_recipe_action(user_text, history)
+    if contextual_action:
+        return contextual_action
+
+    try:
+        dish_names = kg_dish_names()
+    except Exception:
+        dish_names = set()
+    clarification = decide_clarification(user_text, dish_names=dish_names, history=history)
+    if clarification.action == "ask":
+        pending = {
+            "type": clarification.pending_type,
+            "payload": clarification.pending_payload or {},
+            "question": clarification.question,
+            "reason": clarification.reason,
+        }
+        choice_prompt = build_choice_prompt(clarification)
+        return {
+            "type": "content",
+            "content": clarification.question or "我需要先确认一下你的意思。",
+            "reason": clarification.reason,
+            "pending_clarification": pending,
+            "choice_prompt": choice_prompt,
+        }
+    if clarification.action == "execute":
+        return {
+            "type": "tool",
+            "tool_name": clarification.tool_name or "recipe_query_tool",
+            "query": clarification.query or user_text,
+            "reason": clarification.reason,
+        }
 
     if _looks_like_graph_dish_count_question(user_text):
         return {"type": "tool", "query": user_text, "reason": "本地图谱菜品数量统计"}
@@ -422,10 +561,6 @@ def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None
     if _looks_like_recipe_attribute_with_dish_hint(user_text):
         return {"type": "tool", "query": user_text, "reason": "菜谱属性问题含菜式线索，交由本地图谱语义归一"}
 
-    contextual_query = _contextual_recipe_query(user_text, history)
-    if contextual_query:
-        return {"type": "tool", "query": contextual_query, "reason": "根据当前会话最近菜品补全属性追问"}
-
     clarification = _clarification_for_contextless_recipe_attr(user_text)
     if clarification:
         return {"type": "content", "content": clarification}
@@ -440,12 +575,25 @@ async def _execute_web_fallback_after_recipe(
     tool_call_id: str,
 ):
     """菜谱图谱未命中时，自动补一次公网搜索。"""
-    fallback_call = {"name": "web_search_tool", "args": {"query": user_text}, "id": tool_call_id}
+    fallback_call = {
+        "name": "web_search_tool",
+        "args": {"query": _expand_web_recipe_query(user_text)},
+        "id": tool_call_id,
+    }
     messages.append(AIMessage(content="", tool_calls=[fallback_call]))
     executed_name, executed_args, content = await _execute_tool_call(fallback_call)
     _append_tool_result_to_trace(trace, executed_name, executed_args, content)
     messages.append(ToolMessage(content=content, tool_call_id=tool_call_id, name=executed_name))
     return executed_name, executed_args, content
+
+
+def _expand_web_recipe_query(query: str) -> str:
+    """Add common recipe aliases to web fallback searches while preserving the original query."""
+    if "莲藕" in query and any(word in query for word in ("猪脚", "猪蹄", "猪手")):
+        return f"{query} 莲藕猪蹄汤 下厨房 美食天下"
+    if "猪脚" in query:
+        return f"{query} 猪蹄 家常做法"
+    return query
 
 
 async def _execute_forced_tool_call(
@@ -486,8 +634,19 @@ async def _emit_final_answer_from_tool_context(
     token_tracker: TokenUsageTracker | None = None,
 ):
     """工具执行完成后，用不绑定 tools 的普通模型整理最终回答。"""
+    web_choice_prompt = _web_search_choice_prompt_from_tool_context(tool_context)
+    if web_choice_prompt:
+        trace["choice_prompt"] = web_choice_prompt
     yield {"type": "trace", "rag_trace": trace}
     yield {"type": "rag_step", "step": {"label": "正在整理最终回答...", "icon": "✍️"}}
+    grounded_web_fallback_answer = _build_grounded_web_fallback_answer(user_text, tool_context)
+    if grounded_web_fallback_answer:
+        yield {"type": "content", "content": grounded_web_fallback_answer}
+        if token_tracker is not None:
+            trace["token_usage"] = token_tracker.snapshot(final=True)
+            yield {"type": "token_usage", "token_usage": trace["token_usage"]}
+        return
+
     grounded_web_offer_answer = _build_grounded_web_search_offer_answer(tool_context)
     if grounded_web_offer_answer:
         yield {"type": "content", "content": grounded_web_offer_answer}
@@ -499,14 +658,6 @@ async def _emit_final_answer_from_tool_context(
     grounded_reverse_answer = _build_grounded_reverse_answer(tool_context)
     if grounded_reverse_answer:
         yield {"type": "content", "content": grounded_reverse_answer}
-        if token_tracker is not None:
-            trace["token_usage"] = token_tracker.snapshot(final=True)
-            yield {"type": "token_usage", "token_usage": trace["token_usage"]}
-        return
-
-    grounded_web_fallback_answer = _build_grounded_web_fallback_answer(user_text, tool_context)
-    if grounded_web_fallback_answer:
-        yield {"type": "content", "content": grounded_web_fallback_answer}
         if token_tracker is not None:
             trace["token_usage"] = token_tracker.snapshot(final=True)
             yield {"type": "token_usage", "token_usage": trace["token_usage"]}
@@ -867,32 +1018,41 @@ def _build_grounded_web_search_offer_answer(tool_context: list[dict]) -> str:
     return ""
 
 
+def _web_search_choice_prompt_from_tool_context(tool_context: list[dict]) -> dict | None:
+    if any(item.get("tool_name") == "web_search_tool" for item in tool_context):
+        return None
+    for item in reversed(tool_context):
+        if item.get("tool_name") != "recipe_query_tool":
+            continue
+        content = str(item.get("content") or "")
+        if "web_search_offer: True" not in content:
+            continue
+        args = item.get("args") if isinstance(item.get("args"), dict) else {}
+        query = str(args.get("query") or "").strip()
+        if not query:
+            continue
+        return build_web_search_choice_prompt(query)
+    return None
+
+
 def _build_grounded_web_fallback_answer(user_text: str, tool_context: list[dict]) -> str:
     recipe_miss = False
     web_content = ""
     for item in tool_context:
         tool_name = item.get("tool_name")
         content = str(item.get("content") or "")
-        if tool_name == "recipe_query_tool" and "success: False" in content and "web_fallback_allowed: True" in content:
+        if (
+            tool_name == "recipe_query_tool"
+            and "success: False" in content
+            and ("web_fallback_allowed: True" in content or "web_search_offer: True" in content)
+        ):
             recipe_miss = True
         if tool_name == "web_search_tool":
             web_content = content
 
     if not recipe_miss or not web_content:
         return ""
-
-    lines = [f"本地菜谱图谱未收录“{user_text}”。"]
-    if "网络搜索失败" in web_content or "网络搜索没有返回内容" in web_content:
-        lines.append(f"已尝试联网搜索，但搜索工具没有返回可用结果：{web_content.strip()}")
-        lines.append("为了不误导你，我不会凭常识硬编做法。可以换个菜名再查，或者稍后再让我联网试一次。")
-        return "\n".join(lines)
-
-    lines.append("以下是联网搜索返回的公开网页摘要，建议核对来源后再使用：")
-    for raw_line in web_content.splitlines()[1:12]:
-        line = raw_line.strip()
-        if line:
-            lines.append(line)
-    return "\n".join(lines)
+    return compose_web_recipe_answer(user_text, web_content)
 
 
 def _extract_recipe_dish_name(content: str) -> str:
@@ -1274,6 +1434,12 @@ async def stream_search_agent(user_text: str, history: list[dict]):
             if preflight is not None:
                 if preflight.get("type") == "content":
                     content = str(preflight.get("content") or "")
+                    pending_clarification = preflight.get("pending_clarification")
+                    if isinstance(pending_clarification, dict):
+                        trace["pending_clarification"] = pending_clarification
+                    choice_prompt = preflight.get("choice_prompt")
+                    if isinstance(choice_prompt, dict):
+                        trace["choice_prompt"] = choice_prompt
                     token_tracker.add_generated_text(content)
                     trace["token_usage"] = token_tracker.snapshot(final=True)
                     yield {"type": "trace", "rag_trace": trace}
@@ -1283,6 +1449,16 @@ async def stream_search_agent(user_text: str, history: list[dict]):
 
                 query = str(preflight.get("query") or user_text)
                 tool_name = str(preflight.get("tool_name") or "recipe_query_tool")
+                answer_user_text = str(preflight.get("answer_user_text") or query or user_text)
+                pending_web = preflight.get("pending_recipe_web_search")
+                if isinstance(pending_web, dict) and pending_web.get("recipe_miss_content"):
+                    tool_context.append({
+                        "tool_name": "recipe_query_tool",
+                        "args": {"query": str(pending_web.get("original_query") or query)},
+                        "content": str(pending_web.get("recipe_miss_content") or ""),
+                        "synthetic": True,
+                        "source": "pending_recipe_web_search",
+                    })
                 yield {
                     "type": "rag_step",
                     "step": {
@@ -1300,7 +1476,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                     {"query": query},
                     "preflight_recipe_route",
                 )
-                async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory, token_tracker):
+                async for event in _emit_final_answer_from_tool_context(answer_user_text, trace, tool_context, runtime_memory, token_tracker):
                     if event.get("type") == "token_usage":
                         trace["token_usage"] = event.get("token_usage")
                     yield event

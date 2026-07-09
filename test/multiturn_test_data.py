@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """多轮对话测试数据集 — 供 run_multiturn_dialogue_test.py 使用。
 
-共 19 个 case，分三类：memory / distraction / contradiction。
+多轮 case 分三类：memory / distraction / contradiction。
 
 注意：是否设置 expect_tools 取决于该轮是否是新的菜谱/联网任务。
 如果后续轮次提出了新的菜名或新的菜谱请求，仍应设置 expect_tools。
@@ -139,6 +139,123 @@ MULTITURN_TEST_CASES: list[dict[str, Any]] = [
                 expect_tools=[],
                 expect_any_keywords=["爆炒花甲", "吐沙", "焯水", "开口", "大火"],
                 forbid_keywords=["小炒黄牛肉", "牛肉逆纹", "蒜苗"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_007",
+        category="memory",
+        description="从真实对话抽取：疑似错字菜名必须先追问确认，不能直接编答案或联网",
+        expected_behavior=(
+            "第一轮十豆炖鸡应识别为疑似错字，追问是否指土豆炖鸡；"
+            "第二轮用户确认后，必须用纠错后的土豆炖鸡查询本地图谱或后续兜底流程"
+        ),
+        forbidden_behavior="未确认前直接把十豆炖鸡当作真实菜谱回答，或把弱相关搜索摘要拼成答案",
+        turns=[
+            dict(
+                user="我想做十豆炖鸡，需要准备哪些调味料和配菜?",
+                expected_action="ask_clarification",
+                expect_pending_type="uncertain_dish_name",
+                expect_choice_prompt=True,
+                expect_choice_type="uncertain_dish_name",
+                expect_choice_options=["A", "B", "C"],
+                forbid_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["十豆炖鸡", "土豆炖鸡", "确认"],
+                expect_no_web_before_confirmation=True,
+                forbid_keywords=["虫草", "莲藕猪蹄", "猪蹄", "红枣"],
+            ),
+            dict(
+                choose_option="A",
+                expected_action="tool",
+                resolves_pending=True,
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["土豆炖鸡"],
+                forbid_keywords=["虫草", "莲藕猪蹄", "猪蹄", "猪脚", "红枣", "干香菇"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_008",
+        category="memory",
+        description="本地未收录的明确菜谱先请求联网确认，用户同意后用上一轮原问题联网",
+        expected_behavior=(
+            "第一轮凉拌牛肉先查本地图谱，未命中时只询问是否联网；"
+            "第二轮用户说搜一下，必须继承上一轮原始问题调用 web_search_tool"
+        ),
+        forbidden_behavior="确认前直接联网，或确认后忘记上一轮凉拌牛肉问题",
+        turns=[
+            dict(
+                user="凉拌牛肉怎么做",
+                expected_action="offer_web_search",
+                expect_tools=["recipe_query_tool"],
+                expect_offer_web_search=True,
+                expect_choice_prompt=True,
+                expect_choice_type="web_search_confirm",
+                expect_choice_options=["A", "B", "C"],
+                expect_no_web_before_confirmation=True,
+                forbid_tools=["web_search_tool"],
+                expect_any_keywords=["凉拌牛肉"],
+            ),
+            dict(
+                choose_option="A",
+                expected_action="tool",
+                resolves_pending=True,
+                expect_tools=["web_search_tool"],
+                expect_any_keywords=["凉拌牛肉"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_009",
+        category="memory",
+        description="正向菜谱与推荐意图冲突时展示选择框，用户点推荐菜后走推荐查询",
+        expected_behavior="第一轮香辣鸡肉怎么做应先追问具体做法还是推荐菜；第二轮点击推荐菜后按香辣口味鸡肉推荐处理",
+        forbidden_behavior="第一轮直接编造香辣鸡肉做法，或第二轮忘记香辣鸡肉推荐意图",
+        turns=[
+            dict(
+                user="香辣鸡肉怎么做",
+                expected_action="ask_clarification",
+                expect_pending_type="forward_or_recommendation",
+                expect_choice_prompt=True,
+                expect_choice_type="forward_or_recommendation",
+                expect_choice_options=["A", "B", "C"],
+                forbid_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["具体做法", "推荐", "香辣", "鸡肉"],
+            ),
+            dict(
+                choose_option="B",
+                expected_action="tool",
+                resolves_pending=True,
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["香辣", "鸡肉", "小炒鸡"],
+                forbid_keywords=["小炒黄牛肉（", "香辣牛蛙（"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_010",
+        category="memory",
+        description="缺少菜名的属性问题展示选择框，用户点自定义并补菜名后执行查询",
+        expected_behavior="第一轮火力怎么控制应要求补充菜名；第二轮用户通过自定义输入清蒸鲈鱼后查询清蒸鲈鱼",
+        forbidden_behavior="第一轮直接乱查其他菜，或第二轮没有使用用户补充的清蒸鲈鱼",
+        turns=[
+            dict(
+                user="火力怎么控制",
+                expected_action="ask_clarification",
+                expect_pending_type="missing_recipe_target",
+                expect_choice_prompt=True,
+                expect_choice_type="missing_recipe_target",
+                expect_choice_options=["A", "B", "C"],
+                forbid_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["哪道菜", "火力控制"],
+            ),
+            dict(
+                choose_option="C",
+                custom_input="清蒸鲈鱼",
+                expected_action="tool",
+                resolves_pending=True,
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["清蒸鲈鱼"],
             ),
         ],
     ),
