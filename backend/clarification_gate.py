@@ -319,8 +319,16 @@ def _replace_once(text: str, old: str, new: str) -> str:
 
 
 def _last_pending_clarification(history: list[dict]) -> dict | None:
-    for item in reversed(history or []):
-        trace = item.get("rag_trace") if isinstance(item, dict) else None
-        if isinstance(trace, dict) and isinstance(trace.get("pending_clarification"), dict):
-            return trace["pending_clarification"]
+    items = list(history or [])
+    if not items:
+        return None
+    last = items[-1]
+    if not isinstance(last, dict):
+        return None
+    role = str(last.get("role") or last.get("type") or "").lower()
+    if role not in {"ai", "assistant"}:
+        return None
+    trace = last.get("rag_trace") if isinstance(last.get("rag_trace"), dict) else None
+    if isinstance(trace, dict) and isinstance(trace.get("pending_clarification"), dict):
+        return trace["pending_clarification"]
     return None

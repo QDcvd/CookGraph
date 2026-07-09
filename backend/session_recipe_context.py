@@ -34,6 +34,9 @@ def update_context_from_trace(existing: dict | None, user_text: str, rag_trace: 
         context["pending_clarification"] = pending_clarification
         context["updated_at"] = datetime.now().isoformat()
         return context
+    if isinstance(context.get("pending_clarification"), dict):
+        context["pending_clarification"] = None
+        context["updated_at"] = datetime.now().isoformat()
 
     tool_calls = [call for call in rag_trace.get("tool_calls") or [] if isinstance(call, dict)]
     if not tool_calls:
@@ -50,7 +53,7 @@ def update_context_from_trace(existing: dict | None, user_text: str, rag_trace: 
         args = latest_recipe.get("args") if isinstance(latest_recipe.get("args"), dict) else {}
         output = str(latest_recipe.get("output_preview") or "")
         dish = _dish_from_trace_or_output(rag_trace, output)
-        if dish and _recipe_result_is_success(output):
+        if dish and _recipe_result_is_success(output) and _recipe_context_write_is_consistent(user_text, dish, rag_trace, args):
             context["last_dish"] = dish
             context["last_query"] = user_text
             context["last_recipe_tool_result_summary"] = _summarize(output)
@@ -138,6 +141,31 @@ def _recipe_result_is_success(output: str) -> bool:
 def _recipe_result_is_web_search_offer(output: str) -> bool:
     text = str(output or "")
     return "success: False" in text and "web_search_offer: True" in text
+
+
+def _recipe_context_write_is_consistent(user_text: str, dish: str, trace: dict, args: dict) -> bool:
+    context_followup = trace.get("context_followup")
+    if isinstance(context_followup, dict) and context_followup.get("used"):
+        return str(context_followup.get("source_dish") or "") == dish
+
+    user = re.sub(r"\s+", "", str(user_text or ""))
+    query = re.sub(r"\s+", "", str(args.get("query") or ""))
+    dish_text = re.sub(r"\s+", "", str(dish or ""))
+    if dish_text and dish_text in user:
+        return True
+
+    reverse_markers = ["有多少种做法", "有多少做法", "多少种做法", "可以做什么菜", "能做什么菜", "有哪些菜", "有什么菜", "推荐"]
+    if any(marker in user for marker in reverse_markers):
+        return False
+
+    recipe_markers = ["怎么做", "做法", "咋做", "如何做"]
+    if any(marker in user for marker in recipe_markers) and dish_text and dish_text not in user:
+        return False
+
+    if dish_text and dish_text in query:
+        return True
+
+    return True
 
 
 def _summarize(text: str, limit: int = SUMMARY_CHARS) -> str:

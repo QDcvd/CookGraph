@@ -291,6 +291,84 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
         self.assertEqual(preflight.get("type"), "tool")
         self.assertEqual(preflight.get("query"), "辣椒炒肉的调味品")
 
+    def test_clear_new_recipe_request_does_not_inherit_last_dish(self):
+        history = [
+            {"role": "user", "content": "玉米排骨汤怎么做"},
+            {
+                "role": "assistant",
+                "content": "根据本地菜谱图谱，玉米排骨汤可以这样做。",
+                "rag_trace": {
+                    "hybrid_retrieval": {"standard_dish": "玉米排骨汤"},
+                    "tool_calls": [
+                        {
+                            "tool_name": "recipe_query_tool",
+                            "args": {"query": "玉米排骨汤怎么做"},
+                            "output_preview": "【玉米排骨汤 完整档案】",
+                        }
+                    ],
+                },
+            },
+        ]
+
+        preflight = _preflight_recipe_action("小炒肉怎么做", history)
+
+        self.assertIsNotNone(preflight)
+        self.assertEqual(preflight.get("type"), "tool")
+        self.assertEqual(preflight.get("query"), "小炒肉怎么做")
+        self.assertNotEqual(preflight.get("query"), "玉米排骨汤怎么做")
+
+    def test_reverse_query_does_not_inherit_last_dish(self):
+        history = [
+            {"role": "user", "content": "玉米排骨汤怎么做"},
+            {
+                "role": "assistant",
+                "content": "根据本地菜谱图谱，玉米排骨汤可以这样做。",
+                "rag_trace": {
+                    "hybrid_retrieval": {"standard_dish": "玉米排骨汤"},
+                    "tool_calls": [
+                        {
+                            "tool_name": "recipe_query_tool",
+                            "args": {"query": "玉米排骨汤怎么做"},
+                            "output_preview": "【玉米排骨汤 完整档案】",
+                        }
+                    ],
+                },
+            },
+        ]
+
+        preflight = _preflight_recipe_action("牛肉有多少种做法", history)
+
+        self.assertIsNotNone(preflight)
+        self.assertEqual(preflight.get("type"), "tool")
+        self.assertEqual(preflight.get("query"), "牛肉有多少种做法")
+        self.assertNotEqual(preflight.get("query"), "玉米排骨汤怎么做")
+
+    def test_strong_pronoun_followup_inherits_last_dish(self):
+        history = [
+            {"role": "user", "content": "玉米排骨汤怎么做"},
+            {
+                "role": "assistant",
+                "content": "根据本地菜谱图谱，玉米排骨汤可以这样做。",
+                "rag_trace": {
+                    "hybrid_retrieval": {"standard_dish": "玉米排骨汤"},
+                    "tool_calls": [
+                        {
+                            "tool_name": "recipe_query_tool",
+                            "args": {"query": "玉米排骨汤怎么做"},
+                            "output_preview": "【玉米排骨汤 完整档案】",
+                        }
+                    ],
+                },
+            },
+        ]
+
+        preflight = _preflight_recipe_action("它的火力如何", history)
+
+        self.assertIsNotNone(preflight)
+        self.assertEqual(preflight.get("type"), "tool")
+        self.assertEqual(preflight.get("query"), "玉米排骨汤的火力调节过程")
+        self.assertEqual(preflight.get("context_followup", {}).get("source_dish"), "玉米排骨汤")
+
     def test_web_fallback_topic_followup_stays_on_web_instead_of_local_fuzzy(self):
         history = [
             {"role": "user", "content": "锅包肉怎么做"},
@@ -453,6 +531,43 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
 
         self.assertIn("没有足够清晰的做法步骤", content)
         self.assertNotIn("需要我帮你到网上搜一下吗", content)
+
+    def test_pending_clarification_resolution_uses_resolved_query_for_web_fallback(self):
+        history = [
+            {"role": "user", "content": "香辣鸡肉怎么做"},
+            {
+                "role": "assistant",
+                "content": "你是想查一道叫“香辣鸡肉”的具体做法，还是想让我推荐香辣口味、含鸡肉的菜？",
+                "rag_trace": {
+                    "pending_clarification": {
+                        "type": "forward_or_recommendation",
+                        "payload": {
+                            "original_query": "香辣鸡肉怎么做",
+                            "recommended_query": "香辣口味的鸡肉有什么推荐",
+                            "dish_query": "香辣鸡肉怎么做",
+                        },
+                    }
+                },
+            },
+        ]
+
+        async def run():
+            events = []
+            async for event in stream_search_agent("具体做法", history):
+                events.append(event)
+            return events
+
+        events = asyncio.run(run())
+        trace = next((event.get("rag_trace") for event in events if event.get("type") == "trace"), {})
+        tool_calls = trace.get("tool_calls", []) if isinstance(trace, dict) else []
+        web_queries = [
+            (item.get("args") or {}).get("query")
+            for item in tool_calls
+            if item.get("tool_name") == "web_search_tool"
+        ]
+
+        self.assertIn("香辣鸡肉怎么做", web_queries)
+        self.assertNotIn("具体做法", web_queries)
 
 
 if __name__ == "__main__":

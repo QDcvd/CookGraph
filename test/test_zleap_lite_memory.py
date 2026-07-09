@@ -160,6 +160,62 @@ class SessionRecipeContextTests(unittest.TestCase):
         text = build_runtime_memory_context(recipe_context=context)
         self.assertIn("待澄清菜谱问题(uncertain_dish_name)", text)
 
+    def test_clears_pending_clarification_after_next_non_pending_turn(self):
+        previous = {
+            **empty_recipe_context(),
+            "pending_clarification": {
+                "type": "forward_or_recommendation",
+                "payload": {
+                    "original_query": "香辣鸡肉怎么做",
+                    "dish_query": "香辣鸡肉怎么做",
+                },
+            },
+        }
+
+        context = update_context_from_trace(previous, "鸡肉有多少种做法", {"tool_calls": []})
+
+        self.assertIsNone(context["pending_clarification"])
+
+    def test_rejects_stale_context_dish_write_for_clear_new_recipe(self):
+        trace = {
+            "hybrid_retrieval": {"standard_dish": "玉米排骨汤"},
+            "tool_calls": [
+                {
+                    "tool_name": "recipe_query_tool",
+                    "args": {"query": "玉米排骨汤怎么做"},
+                    "output_preview": "【玉米排骨汤 完整档案】甜玉米和排骨炖汤。",
+                }
+            ],
+        }
+
+        context = update_context_from_trace(empty_recipe_context(), "小炒肉怎么做", trace)
+
+        self.assertIsNone(context["last_dish"])
+        self.assertIsNone(context["last_query"])
+
+    def test_allows_context_dish_write_for_marked_pronoun_followup(self):
+        trace = {
+            "context_followup": {
+                "used": True,
+                "source_dish": "玉米排骨汤",
+                "original_user_text": "它的火力如何",
+                "rewritten_query": "玉米排骨汤的火力调节过程",
+            },
+            "hybrid_retrieval": {"standard_dish": "玉米排骨汤"},
+            "tool_calls": [
+                {
+                    "tool_name": "recipe_query_tool",
+                    "args": {"query": "玉米排骨汤的火力调节过程"},
+                    "output_preview": "【玉米排骨汤 完整档案】先大火烧开，再小火慢炖。",
+                }
+            ],
+        }
+
+        context = update_context_from_trace(empty_recipe_context(), "它的火力如何", trace)
+
+        self.assertEqual(context["last_dish"], "玉米排骨汤")
+        self.assertEqual(context["last_query"], "它的火力如何")
+
 
 class RuntimeMemoryRenderTests(unittest.TestCase):
     def test_renders_runtime_memory_block(self):

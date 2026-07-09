@@ -91,6 +91,56 @@ class ClarificationGateTests(unittest.TestCase):
         self.assertEqual(decision.action, "execute")
         self.assertEqual(decision.query, "香辣口味的鸡肉有什么推荐")
 
+    def test_consumed_compound_clarification_does_not_hijack_later_turns(self):
+        history = [
+            {
+                "role": "user",
+                "content": "香辣鸡肉怎么做",
+            },
+            {
+                "role": "assistant",
+                "content": "你是想查一道叫“香辣鸡肉”的具体做法，还是想让我推荐香辣口味、含鸡肉的菜？",
+                "rag_trace": {
+                    "pending_clarification": {
+                        "type": "forward_or_recommendation",
+                        "payload": {
+                            "original_query": "香辣鸡肉怎么做",
+                            "recommended_query": "香辣口味的鸡肉有什么推荐",
+                            "dish_query": "香辣鸡肉怎么做",
+                        },
+                    }
+                },
+            },
+            {
+                "role": "user",
+                "content": "具体做法",
+            },
+            {
+                "role": "assistant",
+                "content": "本地菜谱图谱没有收录“香辣鸡肉怎么做”。",
+                "rag_trace": {
+                    "tool_calls": [
+                        {
+                            "tool_name": "recipe_query_tool",
+                            "args": {"query": "香辣鸡肉怎么做"},
+                            "output_preview": "success: False\nweb_fallback_allowed: True",
+                        },
+                        {
+                            "tool_name": "web_search_tool",
+                            "args": {"query": "香辣鸡肉怎么做"},
+                            "output_preview": "搜索结果：香辣鸡肉怎么做",
+                        },
+                    ]
+                },
+            },
+        ]
+
+        decision = decide_clarification("鸡肉有多少种做法", history=history)
+
+        self.assertEqual(decision.action, "execute")
+        self.assertEqual(decision.tool_name, "recipe_query_tool")
+        self.assertEqual(decision.query, "鸡肉有多少种做法")
+
     def test_unknown_clear_recipe_executes_local_first(self):
         decision = decide_clarification("凉拌牛肉怎么做", dish_names={"清蒸鲈鱼"})
         self.assertEqual(decision.action, "execute")

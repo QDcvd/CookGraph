@@ -24,6 +24,7 @@ from backend.context_manager import (
     history_context_summary,
     recent_context_paths,
 )
+from backend.context_followup_gate import decide_context_followup
 from backend.clarification_gate import (
     build_choice_prompt,
     build_web_search_choice_prompt,
@@ -366,29 +367,28 @@ def _looks_like_recipe_attribute_with_dish_hint(user_text: str) -> bool:
 
 
 def _contextual_recipe_query(user_text: str, history: list[dict]) -> str | None:
-    text = re.sub(r"\s+", "", str(user_text or ""))
-    if not text or _contains_current_dish_name(text):
-        return None
-
     last_dish = _last_dish_from_history(history)
-    if not last_dish:
-        return None
-
-    if any(marker in text for marker in ["火力", "火候"]):
-        return f"{last_dish}的火力调节过程"
-    if any(marker in text for marker in ["注意事项", "注意点", "提示", "要点", "为什么"]):
-        return f"{last_dish}烹饪提示"
-    if any(marker in text for marker in ["调料", "调味", "配料", "用料", "材料"]):
-        return f"{last_dish}的调味品"
-    if any(marker in text for marker in ["怎么做", "做法", "步骤", "它", "这道菜", "刚才那道菜"]):
-        return f"{last_dish}怎么做"
-    return None
+    decision = decide_context_followup(user_text, last_dish=last_dish)
+    return decision.rewritten_query if decision.action == "inherit" else None
 
 
 def _contextual_recipe_action(user_text: str, history: list[dict]) -> dict | None:
-    contextual_query = _contextual_recipe_query(user_text, history)
-    if contextual_query:
-        return {"type": "tool", "query": contextual_query, "reason": "根据当前会话最近菜品补全属性追问"}
+    last_dish = _last_dish_from_history(history)
+    decision = decide_context_followup(user_text, last_dish=last_dish)
+    if decision.action == "inherit" and decision.rewritten_query:
+        return {
+            "type": "tool",
+            "query": decision.rewritten_query,
+            "reason": decision.reason,
+            "context_followup": {
+                "used": True,
+                "source_dish": last_dish,
+                "original_user_text": user_text,
+                "rewritten_query": decision.rewritten_query,
+                "attribute": decision.attribute,
+                "reason": decision.reason,
+            },
+        }
 
     text = re.sub(r"\s+", "", str(user_text or ""))
     topic = _last_web_recipe_topic_from_history(history)
@@ -451,27 +451,28 @@ def _pending_web_search_query_from_history(history: list[dict]) -> str | None:
 
 
 def _pending_recipe_web_search_from_history(history: list[dict]) -> dict | None:
-    for index in range(len(history) - 1, -1, -1):
-        item = history[index]
-        role = _message_role(item)
-        content = _message_content(item)
-        if role not in {"ai", "assistant"}:
+    items = list(history or [])
+    if len(items) < 2:
+        return None
+    item = items[-1]
+    role = _message_role(item)
+    content = _message_content(item)
+    if role not in {"ai", "assistant"}:
+        return None
+    if "需要我帮你到网上搜一下吗" not in content and "需要我帮你联网搜索" not in content:
+        return None
+    recipe_miss = _recipe_web_search_offer_from_message(item)
+    for prev in reversed(items[:-1]):
+        prev_role = _message_role(prev)
+        if prev_role not in {"human", "user"}:
             continue
-        if "需要我帮你到网上搜一下吗" not in content and "需要我帮你联网搜索" not in content:
-            continue
-        recipe_miss = _recipe_web_search_offer_from_message(item)
-        for prev_index in range(index - 1, -1, -1):
-            prev = history[prev_index]
-            prev_role = _message_role(prev)
-            if prev_role not in {"human", "user"}:
-                continue
-            query = _message_content(prev).strip()
-            if query:
-                return {
-                    "type": "recipe_web_search_offer",
-                    "original_query": query,
-                    "recipe_miss_content": recipe_miss or content,
-                }
+        query = _message_content(prev).strip()
+        if query:
+            return {
+                "type": "recipe_web_search_offer",
+                "original_query": query,
+                "recipe_miss_content": recipe_miss or content,
+            }
     return None
 
 
@@ -615,8 +616,9 @@ async def _execute_forced_tool_call(
 
     calls_used = 1
     if executed_name == "recipe_query_tool" and _recipe_query_needs_web_fallback(content):
+        fallback_query = str(executed_args.get("query") or args.get("query") or user_text)
         web_name, web_args, web_content = await _execute_web_fallback_after_recipe(
-            user_text,
+            fallback_query,
             messages,
             trace,
             f"{call_id}_web_fallback",
@@ -1450,6 +1452,9 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                 query = str(preflight.get("query") or user_text)
                 tool_name = str(preflight.get("tool_name") or "recipe_query_tool")
                 answer_user_text = str(preflight.get("answer_user_text") or query or user_text)
+                context_followup = preflight.get("context_followup")
+                if isinstance(context_followup, dict):
+                    trace["context_followup"] = context_followup
                 pending_web = preflight.get("pending_recipe_web_search")
                 if isinstance(pending_web, dict) and pending_web.get("recipe_miss_content"):
                     tool_context.append({
@@ -1539,16 +1544,17 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                         }
                         if executed_name == "recipe_query_tool" and _recipe_query_needs_web_fallback(content):
                             if total_tool_calls < MAX_TOTAL_TOOL_CALLS:
+                                fallback_query = str(forced_args.get("query") or user_text)
                                 yield {
                                     "type": "rag_step",
                                     "step": {
                                         "label": "本地图谱未命中，补充联网搜索",
                                         "icon": "🌐",
-                                        "detail": user_text,
+                                        "detail": fallback_query,
                                     },
                                 }
                                 web_name, _web_args, web_content = await _execute_web_fallback_after_recipe(
-                                    user_text,
+                                    fallback_query,
                                     messages,
                                     trace,
                                     f"recipe_web_fallback_{turn_index}",
@@ -1685,16 +1691,17 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                     }
                     if executed_name == "recipe_query_tool" and _recipe_query_needs_web_fallback(content):
                         if total_tool_calls < MAX_TOTAL_TOOL_CALLS:
+                            fallback_query = str(args.get("query") or user_text)
                             yield {
                                 "type": "rag_step",
                                 "step": {
                                     "label": "本地图谱未命中，补充联网搜索",
                                     "icon": "🌐",
-                                    "detail": user_text,
+                                    "detail": fallback_query,
                                 },
                             }
                             web_name, _web_args, web_content = await _execute_web_fallback_after_recipe(
-                                user_text,
+                                fallback_query,
                                 messages,
                                 trace,
                                 f"recipe_web_fallback_{turn_index}_{index}",

@@ -259,6 +259,114 @@ MULTITURN_TEST_CASES: list[dict[str, Any]] = [
             ),
         ],
     ),
+    dict(
+        id="memory_011",
+        category="memory",
+        description="上一道菜之后出现反向食材查询，不能继承旧菜名",
+        expected_behavior="玉米排骨汤后问牛肉有多少种做法，应按牛肉反向查询，而不是继续查玉米排骨汤",
+        forbidden_behavior="把牛肉反向查询改写成玉米排骨汤怎么做",
+        turns=[
+            dict(
+                user="玉米排骨汤怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["玉米排骨汤", "排骨", "玉米"],
+                forbid_keywords=[],
+            ),
+            dict(
+                user="牛肉有多少种做法",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["牛肉", "小炒黄牛肉", "黑椒牛柳"],
+                forbid_keywords=["根据本地菜谱图谱，玉米排骨汤可以这样做", "甜玉米", "排骨汤"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_012",
+        category="memory",
+        description="上一道菜之后出现明确新菜谱问题，不能继承旧菜名",
+        expected_behavior="玉米排骨汤后问小炒肉怎么做，应按小炒肉这个新问题处理，不能继续答玉米排骨汤",
+        forbidden_behavior="把小炒肉怎么做改写成玉米排骨汤怎么做",
+        turns=[
+            dict(
+                user="玉米排骨汤怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["玉米排骨汤", "排骨", "玉米"],
+                forbid_keywords=[],
+            ),
+            dict(
+                user="小炒肉怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["小炒肉", "辣椒炒肉", "需要我帮你到网上搜一下吗"],
+                forbid_keywords=["根据本地菜谱图谱，玉米排骨汤可以这样做", "甜玉米", "排骨汤"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_013",
+        category="memory",
+        description="上一道菜之后出现强指代属性追问，应该继承旧菜名",
+        expected_behavior="玉米排骨汤后问它的火力如何，应继承玉米排骨汤并回答火力相关内容",
+        forbidden_behavior="把强指代追问当成无上下文问题，或要求用户重新提供菜名",
+        turns=[
+            dict(
+                user="玉米排骨汤怎么做",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["玉米排骨汤", "排骨", "玉米"],
+                forbid_keywords=[],
+            ),
+            dict(
+                user="它的火力如何",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["玉米排骨汤", "火", "炖"],
+                forbid_keywords=["请先告诉我要查询哪道菜", "需要您提供具体菜品"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_014",
+        category="memory",
+        description="已消费的澄清选择不能劫持后续新问题",
+        expected_behavior=(
+            "香辣鸡肉触发澄清后，用户选择具体做法只消费一次；"
+            "后续鸡肉反向查询和小炒鸡新菜谱查询必须按当前用户输入重新路由"
+        ),
+        forbidden_behavior="旧的香辣鸡肉 pending 在后续多轮中复活，导致 recipe_query_tool 一直查香辣鸡肉",
+        turns=[
+            dict(
+                user="香辣鸡肉怎么做",
+                expected_action="ask_clarification",
+                expect_pending_type="forward_or_recommendation",
+                expect_choice_prompt=True,
+                expect_choice_type="forward_or_recommendation",
+                expect_choice_options=["A", "B", "C"],
+                forbid_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["具体做法", "推荐", "香辣", "鸡肉"],
+            ),
+            dict(
+                choose_option="A",
+                expected_action="tool",
+                resolves_pending=True,
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["香辣鸡肉"],
+                forbid_keywords=["搜索结果：具体做法", "具体做法英文", "行动建议"],
+                expect_web_fallback=True,
+            ),
+            dict(
+                user="鸡肉有多少种做法",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["鸡肉"],
+                forbid_keywords=["本地菜谱图谱没有收录“香辣鸡肉怎么做”", "具体做法英文", "行动建议"],
+            ),
+            dict(
+                user="小炒鸡怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["小炒鸡", "三黄鸡"],
+                forbid_keywords=["本地菜谱图谱没有收录“香辣鸡肉怎么做”", "搜索结果：具体做法"],
+            ),
+        ],
+    ),
     # ═══════════════════════════════════════════
     # distraction 类 — 不被无关内容干扰
     # ═══════════════════════════════════════════
