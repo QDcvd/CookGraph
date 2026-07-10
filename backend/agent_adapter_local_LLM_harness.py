@@ -66,7 +66,7 @@ AGENT_TIMEOUT_SECONDS = 900
 FINAL_ANSWER_TIMEOUT_SECONDS = 180
 DEFAULT_LLM_MODEL = "qwen3-4b"
 LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 2048)
-LLM_NO_THINK = _env_bool("LLM_NO_THINK", True)
+LLM_NO_THINK = _env_bool("LLM_NO_THINK", False)
 INTENT_ROUTER_NO_THINK = _env_bool("INTENT_ROUTER_NO_THINK", False)
 FINAL_ANSWER_NO_THINK = _env_bool("FINAL_ANSWER_NO_THINK", True)
 MAX_MODEL_LEN = _env_int("MAX_MODEL_LEN", _env_int("LLM_MAX_MODEL_LEN", 32768))
@@ -1545,61 +1545,10 @@ async def stream_search_agent(user_text: str, history: list[dict]):
 
     try:
         async with asyncio.timeout(AGENT_TIMEOUT_SECONDS):
-            preflight = _preflight_recipe_action(user_text, history)
-            if preflight is not None:
-                if preflight.get("type") == "content":
-                    content = str(preflight.get("content") or "")
-                    pending_clarification = preflight.get("pending_clarification")
-                    if isinstance(pending_clarification, dict):
-                        trace["pending_clarification"] = pending_clarification
-                    choice_prompt = preflight.get("choice_prompt")
-                    if isinstance(choice_prompt, dict):
-                        trace["choice_prompt"] = choice_prompt
-                    token_tracker.add_generated_text(content)
-                    trace["token_usage"] = token_tracker.snapshot(final=True)
-                    yield {"type": "trace", "rag_trace": trace}
-                    yield _token_usage_event(token_tracker, final=True)
-                    yield {"type": "content", "content": content}
-                    return
-
-                query = str(preflight.get("query") or user_text)
-                tool_name = str(preflight.get("tool_name") or "recipe_query_tool")
-                answer_user_text = str(preflight.get("answer_user_text") or query or user_text)
-                context_followup = preflight.get("context_followup")
-                if isinstance(context_followup, dict):
-                    trace["context_followup"] = context_followup
-                pending_web = preflight.get("pending_recipe_web_search")
-                if isinstance(pending_web, dict) and pending_web.get("recipe_miss_content"):
-                    tool_context.append({
-                        "tool_name": "recipe_query_tool",
-                        "args": {"query": str(pending_web.get("original_query") or query)},
-                        "content": str(pending_web.get("recipe_miss_content") or ""),
-                        "synthetic": True,
-                        "source": "pending_recipe_web_search",
-                    })
-                yield {
-                    "type": "rag_step",
-                    "step": {
-                        "label": f"确定性工具路由：{tool_name}",
-                        "icon": "🧭",
-                        "detail": f"{preflight.get('reason')}: {query}",
-                    },
-                }
-                total_tool_calls += await _execute_forced_tool_call(
-                    user_text,
-                    messages,
-                    trace,
-                    tool_context,
-                    tool_name,
-                    {"query": query},
-                    "preflight_recipe_route",
-                    history,
-                )
-                async for event in _emit_final_answer_from_tool_context(answer_user_text, trace, tool_context, runtime_memory, token_tracker):
-                    if event.get("type") == "token_usage":
-                        trace["token_usage"] = event.get("token_usage")
-                    yield event
-                return
+            # preflight 已禁用（Claude Code 风格：路由决策交给工具描述 + 模型）
+            # preflight 原逻辑：_preflight_recipe_action() 拦截上下文追问/确认联网/歧义
+            # 移除原因：新菜名（如"小炒鸡具体做法"）被 preflight 误判为旧菜名属性追问
+            # 替代方案：在工具描述中写清楚路由规则，让模型自行决定
 
             for turn_index in range(MAX_TOOL_TURNS):
                 yield {
