@@ -118,6 +118,7 @@ def _start_tunnel(local_host: str, local_port: int):
     if not remote_host or not remote_user:
         return None
     try:
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"paramiko\..*")
         warnings.filterwarnings("ignore", message="Blowfish has been deprecated.*")
         import paramiko
 

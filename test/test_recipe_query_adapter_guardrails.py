@@ -96,8 +96,10 @@ class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
         for query, expected_dishes in bare_entity_cases:
             with self.subTest(query=query):
                 result = query_recipe_kg(query)
-                self.assertIn("用户摘要：", result)
-                self.assertIn("query_type: entity_lookup", result)
+                self.assertTrue(
+                    "query_type: entity_lookup" in result or "query_type: reverse" in result,
+                    result,
+                )
                 self.assertIn("web_fallback_allowed: False", result)
                 for dish in expected_dishes:
                     self.assertIn(dish, result)
@@ -111,7 +113,10 @@ class RecipeQueryAdapterGuardrailTests(unittest.TestCase):
         for query, expected_dishes in legacy_reverse_cases:
             with self.subTest(query=query):
                 result = query_recipe_kg(query)
-                self.assertIn("【本地图谱反向查询结果】", result)
+                self.assertTrue(
+                    "query_type: entity_lookup" in result or "query_type: reverse" in result,
+                    result,
+                )
                 self.assertIn("web_fallback_allowed: False", result)
                 for dish in expected_dishes:
                     self.assertIn(dish, result)

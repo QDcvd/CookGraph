@@ -58,6 +58,15 @@ def route_query(user_text: str, history: list[dict] | None = None) -> QueryActio
     except Exception:
         dish_names = set()
 
+    if _looks_like_graph_dish_count_query(text):
+        return QueryAction(
+            action="tool",
+            tool_name="recipe_query_tool",
+            query=text,
+            reason="本地图谱菜品数量统计",
+            confidence=1.0,
+        )
+
     recipe_context = _recipe_context_from_history(history)
     clarification = decide_clarification(text, dish_names=dish_names, history=history)
     contextual_attr_query = _contextual_attribute_query(
@@ -243,6 +252,15 @@ def _known_dish_in_text(text: str, dish_names: set[str]) -> str:
     if not matches:
         return ""
     return max(matches, key=len)
+
+
+def _looks_like_graph_dish_count_query(text: str) -> bool:
+    compact = "".join(str(text or "").split())
+    return (
+        "收录" in compact
+        and "多少" in compact
+        and any(marker in compact for marker in ("菜", "菜谱", "菜品"))
+    )
 
 
 def _extract_dish_from_tool_output(output: str) -> str:

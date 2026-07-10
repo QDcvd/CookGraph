@@ -233,6 +233,7 @@ def _build_llm_router_prompt(raw: str, node_names_by_type: dict[str, set[str]]) 
         "硬性例子：\n"
         "- “猪肉做法” => entity_lookup, ingredient=猪肉, relation_scope=core_first。\n"
         "- “鸡蛋做法” => entity_lookup, ingredient=鸡蛋, relation_scope=core_first。\n"
+        "- “虾怎么做” => entity_lookup, ingredient=虾, relation_scope=core_first。\n"
         "- “洋葱炒牛肉的做法” => forward_recipe_query，不要拆成牛肉 entity_lookup。\n"
         "- “香辣口味的牛肉有什么推荐” => compound_recommendation，constraints 必须同时包含 ingredient=牛肉 和 taste=香辣味。\n\n"
         "输出 JSON schema：\n"

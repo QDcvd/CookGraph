@@ -78,9 +78,15 @@ def _execute_entity_lookup(plan: QueryPlan, system: Any) -> dict[str, Any]:
     if plan.relation_scope == "core_first" and entity_type == "ingredient":
         relations = ["USES_MAIN_INGREDIENT", "USES_AUXILIARY"]
     accepted_values = ENTITY_VALUE_ALIASES.get(value, {value})
+    edges = _scan_dish_edges(system)
+    if entity_type == "technique":
+        derived_ingredients = _derived_ingredient_values(value, edges)
+        if derived_ingredients:
+            relations = [*relations, "USES_AUXILIARY", "USES_MAIN_INGREDIENT"]
+            accepted_values = {*accepted_values, *derived_ingredients}
 
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for item in _scan_dish_edges(system):
+    for item in edges:
         if item["relation"] not in relations:
             continue
         if item["target_name"] not in accepted_values:
@@ -106,6 +112,22 @@ def _execute_entity_lookup(plan: QueryPlan, system: Any) -> dict[str, Any]:
         "source_policy": "local_graph_only",
         "web_fallback_allowed": False,
     }
+
+
+def _derived_ingredient_values(value: str, edges: list[dict[str, Any]]) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    ingredient_values = {
+        str(item.get("target_name") or "")
+        for item in edges
+        if item.get("relation") in {"USES_MAIN_INGREDIENT", "USES_AUXILIARY"}
+    }
+    candidates = {text}
+    for suffix in ("炒", "制", "煮", "蒸", "炸", "煎", "炖"):
+        if text.endswith(suffix) and len(text) > len(suffix):
+            candidates.add(text[: -len(suffix)])
+    return {candidate for candidate in candidates if candidate in ingredient_values}
 
 
 def _execute_compound_recommendation(plan: QueryPlan, system: Any) -> dict[str, Any]:
