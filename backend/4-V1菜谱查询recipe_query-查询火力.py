@@ -34,6 +34,192 @@ FUZZY_THRESHOLD = 0.6
 # =============================================
 
 
+
+class CypherParser:
+    """解析简化Cypher语句，转换为内部查询参数"""
+
+    # 支持的Cypher模式正则
+    PATTERNS = {
+        # 模式1: MATCH (d:Dish {name:'xxx'}) RETURN d.attr_name  -> 正向属性
+        'forward_attr': re.compile(
+            r"MATCH\s+\((\w+):Dish\s+\{name:\s*['\"](.+?)['\"]\}\)\s+RETURN\s+\1\.(\w+)",
+            re.IGNORECASE
+        ),
+        # 模式2: MATCH (d:Dish {name:'xxx'})-[:REL]->(t) RETURN t.name  -> 正向关系
+        'forward_rel': re.compile(
+            r"MATCH\s+\((\w+):Dish\s+\{name:\s*['\"](.+?)['\"]\}\)-\[:\s*(\w+)\s*\]->\(\w+\)\s+RETURN\s+\w+\.name",
+            re.IGNORECASE
+        ),
+        # 模式3: MATCH (d:Dish)-[:REL]->(t:Type {name:'xxx'}) RETURN d.name  -> 反向查询
+        'reverse': re.compile(
+            r"MATCH\s+\((\w+):Dish\)-\[:\s*(\w+)\s*\]->\((\w+):\w+\s+\{name:\s*['\"](.+?)['\"]\}\)\s+RETURN\s+\1\.name",
+            re.IGNORECASE
+        ),
+        # 模式4: MATCH (d:Dish {name:'xxx'})-[:REL]->(t:Type {name:'yyy'}) RETURN ...  -> 带值正向关系
+        'forward_rel_with_value': re.compile(
+            r"MATCH\s+\((\w+):Dish\s+\{name:\s*['\"](.+?)['\"]\}\)-\[:\s*(\w+)\s*\]->\(\w+:\w+\s+\{name:\s*['\"](.+?)['\"]\}\)",
+            re.IGNORECASE
+        ),
+        # 模式5: MATCH (d:Dish {name:'xxx'}) RETURN d  -> 完整档案
+        'forward_summary': re.compile(
+            r"MATCH\s+\((\w+):Dish\s+\{name:\s*['\"](.+?)['\"]\}\)\s+RETURN\s+\1\b(?!\.)",
+            re.IGNORECASE
+        ),
+        # 模式6: 简写: (d:Dish)-[:REL]->(t {name:'xxx'}) RETURN d.name
+        'reverse_short': re.compile(
+            r"\((\w+):Dish\)-\[:\s*(\w+)\s*\]->\(\w+\s+\{name:\s*['\"](.+?)['\"]\}\)\s+RETURN\s+\1\.name",
+            re.IGNORECASE
+        ),
+    }
+
+    @classmethod
+    def is_cypher(cls, query: str) -> bool:
+        """判断是否为Cypher语句"""
+        q = query.strip().upper()
+        return q.startswith('MATCH') or 'RETURN' in q
+
+    @classmethod
+    def parse(cls, query: str) -> Dict[str, Any]:
+        """解析Cypher语句，返回与QueryParser.parse兼容的参数字典"""
+        query = query.strip()
+        result = {
+            'type': 'unknown',
+            'dish': None,
+            'target_type': None,
+            'target_name': None,
+            'reverse_value': None,
+            'original': query,
+            'cypher': True
+        }
+
+        print(f"   [Cypher] 解析Cypher语句: {query}")
+
+        # 尝试各模式匹配
+        for mode, pattern in cls.PATTERNS.items():
+            match = pattern.search(query)
+            if match:
+                print(f"   [Cypher] 匹配模式: {mode}")
+
+                if mode == 'forward_attr':
+                    result['type'] = 'forward_attr'
+                    result['dish'] = match.group(2)
+                    result['target_type'] = 'attribute'
+                    result['target_name'] = match.group(3)
+                    return result
+
+                elif mode == 'forward_rel':
+                    result['type'] = 'forward_rel'
+                    result['dish'] = match.group(2)
+                    result['target_type'] = 'relation'
+                    result['target_name'] = match.group(3).upper()
+                    return result
+
+                elif mode == 'reverse':
+                    result['type'] = 'reverse'
+                    result['target_name'] = match.group(2).upper()
+                    result['reverse_value'] = match.group(4)
+                    return result
+
+                elif mode == 'reverse_short':
+                    result['type'] = 'reverse'
+                    result['target_name'] = match.group(2).upper()
+                    result['reverse_value'] = match.group(3)
+                    return result
+
+                elif mode == 'forward_rel_with_value':
+                    result['type'] = 'forward_rel'
+                    result['dish'] = match.group(2)
+                    result['target_type'] = 'relation'
+                    result['target_name'] = match.group(3).upper()
+                    result['filter_value'] = match.group(4)
+                    return result
+
+                elif mode == 'forward_summary':
+                    result['type'] = 'forward_summary'
+                    result['dish'] = match.group(2)
+                    return result
+
+        # 兜底：尝试更宽松的解析
+        return cls._loose_parse(query, result)
+
+    @classmethod
+    def _loose_parse(cls, query: str, result: Dict) -> Dict:
+        """宽松解析：提取关键元素"""
+        query_upper = query.upper()
+
+        # 提取 Dish name
+        dish_match = re.search(r"\{name:\s*['\"](.+?)['\"]\}", query, re.IGNORECASE)
+        if dish_match:
+            result['dish'] = dish_match.group(1)
+
+        # 提取关系类型
+        rel_match = re.search(r"-\[:\s*(\w+)\s*\]->", query, re.IGNORECASE)
+        if rel_match:
+            result['target_name'] = rel_match.group(1).upper()
+            result['target_type'] = 'relation'
+
+        # 提取 RETURN 的字段
+        return_match = re.search(r"RETURN\s+(\w+)\.(\w+)", query, re.IGNORECASE)
+        if return_match:
+            returned = return_match.group(2).lower()
+            if returned == 'name':
+                if 'Dish' in query_upper and result.get('target_name'):
+                    result['type'] = 'reverse'
+                    val_match = re.search(r"\{name:\s*['\"](.+?)['\"]\}.*RETURN", query, re.IGNORECASE)
+                    if val_match and val_match.group(1) != result.get('dish'):
+                        result['reverse_value'] = val_match.group(1)
+            else:
+                result['type'] = 'forward_attr'
+                result['target_name'] = returned
+                result['target_type'] = 'attribute'
+
+        # 如果 RETURN 是整个节点
+        if re.search(r"RETURN\s+\w+\b(?!\.)", query, re.IGNORECASE) and not return_match:
+            result['type'] = 'forward_summary'
+
+        print(f"   [Cypher] 宽松解析结果: type={result['type']}, dish={result.get('dish')}, target={result.get('target_name')}, reverse_value={result.get('reverse_value')}")
+        return result
+
+    @classmethod
+    def get_supported_syntax(cls) -> str:
+        """返回支持的Cypher语法说明"""
+        return """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        支持的简化Cypher语法                                    ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ 1. 正向属性查询 - 查菜品属性                                                  ║
+║    MATCH (d:Dish {name:'菜名'}) RETURN d.属性名                               ║
+║    例: MATCH (d:Dish {name:'小炒黄牛肉'}) RETURN d.prep_process              ║
+║    例: MATCH (d:Dish {name:'小炒黄牛肉'}) RETURN d.cooking_tips              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ 2. 正向关系查询 - 查菜品关联实体                                              ║
+║    MATCH (d:Dish {name:'菜名'})-[:关系类型]->(t) RETURN t.name                ║
+║    例: MATCH (d:Dish {name:'小炒黄牛肉'})-[:USES_TECHNIQUE]->(t) RETURN t.name║
+║    例: MATCH (d:Dish {name:'小炒黄牛肉'})-[:USES_MAIN_INGREDIENT]->(t) RETURN t.name
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ 3. 反向查询 - 查哪些菜用了某实体                                              ║
+║    MATCH (d:Dish)-[:关系类型]->(t:实体类型 {name:'值'}) RETURN d.name          ║
+║    例: MATCH (d:Dish)-[:USES_TECHNIQUE]->(t:Technique {name:'炝炒'}) RETURN d.name
+║    例: MATCH (d:Dish)-[:USES_MAIN_INGREDIENT]->(t:Ingredient {name:'黄牛肉'}) RETURN d.name
+║    简写: (d:Dish)-[:USES_TECHNIQUE]->(t {name:'炝炒'}) RETURN d.name           ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ 4. 完整档案查询                                                               ║
+║    MATCH (d:Dish {name:'菜名'}) RETURN d                                      ║
+║    例: MATCH (d:Dish {name:'小炒黄牛肉'}) RETURN d                           ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ 5. 带值正向关系（过滤特定值）                                                 ║
+║    MATCH (d:Dish {name:'菜名'})-[:关系]->(t:Type {name:'值'})                 ║
+║    例: MATCH (d:Dish {name:'小炒黄牛肉'})-[:USES_MAIN_INGREDIENT]->(t:Ingredient {name:'黄牛肉'})
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ 可用的关系类型（RELATION）：                                                  ║
+║    USES_TECHNIQUE, USES_MAIN_INGREDIENT, USES_SEASONING,                    ║
+║    HAS_TASTE, BELONGS_TO_CUISINE, SUITABLE_FOR, USES_METHOD                  ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║ 可用的属性名（ATTRIBUTE）：                                                   ║
+║    prep_process, cooking_process, cooking_tips, 以及配置文件中定义的其他属性   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
 class ConfigLoader:
     """加载配置文件"""
     
@@ -113,9 +299,24 @@ class QueryParser:
     
     def parse(self, query: str) -> Dict[str, Any]:
         """
-        解析查询语句，返回查询参数
+        解析查询语句，支持自然语言和Cypher语法
         """
         query_original = query.strip()
+
+        # 优先检测Cypher语句
+        if CypherParser.is_cypher(query_original):
+            return CypherParser.parse(query_original)
+
+        query_lower = query_original.lower()
+        result = {
+            'type': 'unknown',
+            'dish': None,
+            'target_type': None,
+            'target_name': None,
+            'reverse_value': None,
+            'original': query_original
+        }
+
         query_lower = query_original.lower()
         result = {
             'type': 'unknown',
@@ -842,18 +1043,24 @@ class RecipeQuerySystem:
         """交互模式"""
         print("\n🍳 菜谱知识图谱查询系统 - 交互模式")
         print("支持查询示例：")
-        print('  "小炒黄牛肉的备菜过程"')
-        print('  "小炒黄牛肉的配料有哪些"')
-        print('  "哪些菜用了炝炒技法"')
-        print('  "包含黄牛肉的菜式"')
-        print('  "输入 exit 退出"\n')
-        
+        print('  自然语言: "小炒黄牛肉的备菜过程"')
+        print('  自然语言: "小炒黄牛肉的配料有哪些"')
+        print('  自然语言: "哪些菜用了炝炒技法"')
+        print('  自然语言: "包含黄牛肉的菜式"')
+        print('  Cypher:   MATCH (d:Dish {name:"小炒黄牛肉"}) RETURN d.prep_process')
+        print('  Cypher:   MATCH (d:Dish)-[:USES_TECHNIQUE]->(t:Technique {name:"炝炒"}) RETURN d.name')
+        print('  输入 help_cypher 查看完整Cypher语法说明')
+        print('  输入 exit 退出\n')
+
         while True:
             try:
                 query = input("> ").strip()
                 if query.lower() in ['exit', 'quit', '退出', 'q']:
                     print("再见！")
                     break
+                if query.lower() in ['help_cypher', 'cypher_help', 'cypher']:
+                    print(CypherParser.get_supported_syntax())
+                    continue
                 if query:
                     self.query(query)
             except KeyboardInterrupt:
@@ -876,19 +1083,31 @@ def main():
   python 4-V1菜谱查询recipe_query-查询火力.py "哪些菜用了炝炒技法"
   python 4-V1菜谱查询recipe_query-查询火力.py "主要食材包含黄牛肉的菜"
   python 4-V1菜谱查询recipe_query-查询火力.py "小炒黄牛肉的火力调节过程"  
+
+  # Cypher查询
+  python 4-V1菜谱查询recipe_query-查询火力.py "MATCH (d:Dish {name:'小炒黄牛肉'}) RETURN d.prep_process"
+  python 4-V1菜谱查询recipe_query-查询火力.py "MATCH (d:Dish {name:'小炒黄牛肉'})-[:USES_TECHNIQUE]->(t) RETURN t.name"
+  python 4-V1菜谱查询recipe_query-查询火力.py "MATCH (d:Dish)-[:USES_TECHNIQUE]->(t:Technique {name:'炝炒'}) RETURN d.name"
+  python 4-V1菜谱查询recipe_query-查询火力.py "MATCH (d:Dish {name:'小炒黄牛肉'}) RETURN d"
+
   # 参数式查询
   python 4-V1菜谱查询recipe_query-查询火力.py -d "小炒黄牛肉" -f "备菜过程"
   python 4-V1菜谱查询recipe_query-查询火力.py -d "小炒黄牛肉" -r "USES_MAIN_INGREDIENT"
   python 4-V1菜谱查询recipe_query-查询火力.py --reverse --technique "炝炒"
   python 4-V1菜谱查询recipe_query-查询火力.py --reverse --ingredient "牛肉"
-  
+
   # 交互模式
   python 4-V1菜谱查询recipe_query-查询火力.py -i
+
+  # Cypher语法帮助
+  python 4-V1菜谱查询recipe_query-查询火力.py -c
         """
+
     )
     
-    parser.add_argument('query', nargs='?', help='自然语言查询语句')
+    parser.add_argument('query', nargs='?', help='自然语言或Cypher查询语句')
     parser.add_argument('-i', '--interactive', action='store_true', help='交互模式')
+    parser.add_argument('-c', '--cypher-help', action='store_true', help='显示Cypher语法帮助')
     parser.add_argument('-d', '--dish', help='指定菜名（正向查询）')
     parser.add_argument('-f', '--field', help='查询字段/属性名')
     parser.add_argument('-r', '--relation', dest='relation_type', help='查询关系类型')
@@ -899,12 +1118,16 @@ def main():
     parser.add_argument('--cuisine', help='按菜系反向查询')
     parser.add_argument('--value', help='反向查询的值')
     parser.add_argument('-k', '--kg-path', default=DEFAULT_KG_PATH, help=f'知识图谱路径 (默认: {DEFAULT_KG_PATH})')
-    
     args = parser.parse_args()
-    
+
+    # 显示Cypher帮助
+    if args.cypher_help:
+        print(CypherParser.get_supported_syntax())
+        sys.exit(0)
+
     # 初始化系统
     system = RecipeQuerySystem(args.kg_path)
-    
+
     if args.interactive:
         system.interactive()
     elif args.query:
@@ -916,7 +1139,5 @@ def main():
         system._print_result(result)
     else:
         parser.print_help()
-
-
 if __name__ == '__main__':
     main()

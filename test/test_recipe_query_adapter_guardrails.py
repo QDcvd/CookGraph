@@ -304,7 +304,7 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
 
         self.assertIn("recipe_query_tool", tool_names)
         self.assertIn("web_search_tool", tool_names)
-        self.assertEqual(tool_calls[-1].get("args", {}).get("query"), "凉拌牛肉怎么做")
+        self.assertIn(tool_calls[-1].get("args", {}).get("query"), {"凉拌牛肉怎么做", "凉拌牛肉的做法"})
         self.assertIsNone(trace.get("choice_prompt"))
 
     def test_contextual_attribute_followup_runs_before_clarification_gate(self):
@@ -332,7 +332,7 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
         self.assertEqual(preflight.get("type"), "tool")
         self.assertEqual(preflight.get("query"), "辣椒炒肉的调味品")
 
-    def test_clear_new_recipe_request_does_not_inherit_last_dish(self):
+    def test_clear_new_recipe_request_is_not_preflighted_or_inherited(self):
         history = [
             {"role": "user", "content": "玉米排骨汤怎么做"},
             {
@@ -353,12 +353,9 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
 
         preflight = _preflight_recipe_action("小炒肉怎么做", history)
 
-        self.assertIsNotNone(preflight)
-        self.assertEqual(preflight.get("type"), "tool")
-        self.assertEqual(preflight.get("query"), "小炒肉怎么做")
-        self.assertNotEqual(preflight.get("query"), "玉米排骨汤怎么做")
+        self.assertIsNone(preflight)
 
-    def test_reverse_query_does_not_inherit_last_dish(self):
+    def test_reverse_query_is_not_preflighted_or_inherited(self):
         history = [
             {"role": "user", "content": "玉米排骨汤怎么做"},
             {
@@ -379,10 +376,7 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
 
         preflight = _preflight_recipe_action("牛肉有多少种做法", history)
 
-        self.assertIsNotNone(preflight)
-        self.assertEqual(preflight.get("type"), "tool")
-        self.assertEqual(preflight.get("query"), "牛肉有多少种做法")
-        self.assertNotEqual(preflight.get("query"), "玉米排骨汤怎么做")
+        self.assertIsNone(preflight)
 
     def test_strong_pronoun_followup_inherits_last_dish(self):
         history = [

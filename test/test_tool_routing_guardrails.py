@@ -1,6 +1,8 @@
 import unittest
 
 from backend.agent_adapter_local_LLM_harness import (
+    _build_final_prompt,
+    _build_route_prompt,
     _build_direct_chat_prompt,
     _looks_like_tool_request,
     _recipe_query_needs_web_fallback,
@@ -47,6 +49,19 @@ web_fallback_allowed: True
         messages = _build_direct_chat_prompt("凉拌牛肉怎么做", [])
         system = messages[0].content
         self.assertIn("不能凭常识编菜谱", system)
+
+    def test_intent_routing_can_think_while_final_answer_is_no_think(self):
+        route_messages = _build_route_prompt("牛肉做法")
+        route_user = route_messages[-1].content
+        self.assertNotIn("/no_think", route_user)
+
+        final_messages = _build_final_prompt(
+            "牛肉做法",
+            trace={"tool_calls": []},
+            tool_context=[],
+        )
+        final_user = final_messages[-1].content
+        self.assertTrue(final_user.lstrip().startswith("/no_think"))
 
 
 if __name__ == "__main__":

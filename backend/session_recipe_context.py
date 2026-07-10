@@ -17,6 +17,8 @@ def empty_recipe_context() -> dict:
         "last_recipe_tool_result_summary": None,
         "last_web_fallback_query": None,
         "last_web_fallback_summary": None,
+        "last_reverse_candidates": [],
+        "last_reverse_source_query": None,
         "pending_recipe_web_search": None,
         "pending_clarification": None,
         "last_tool_names": [],
@@ -53,14 +55,23 @@ def update_context_from_trace(existing: dict | None, user_text: str, rag_trace: 
         args = latest_recipe.get("args") if isinstance(latest_recipe.get("args"), dict) else {}
         output = str(latest_recipe.get("output_preview") or "")
         dish = _dish_from_trace_or_output(rag_trace, output)
+        reverse_candidates = _reverse_candidates_from_output(output)
+        if reverse_candidates:
+            context["last_reverse_candidates"] = reverse_candidates
+            context["last_reverse_source_query"] = str(args.get("query") or user_text)
+            context["updated_at"] = datetime.now().isoformat()
         if dish and _recipe_result_is_success(output) and _recipe_context_write_is_consistent(user_text, dish, rag_trace, args):
             context["last_dish"] = dish
             context["last_query"] = user_text
             context["last_recipe_tool_result_summary"] = _summarize(output)
+            context["last_reverse_candidates"] = []
+            context["last_reverse_source_query"] = None
             context["pending_recipe_web_search"] = None
             context["pending_clarification"] = None
             context["updated_at"] = datetime.now().isoformat()
         elif _recipe_result_is_web_search_offer(output):
+            context["last_reverse_candidates"] = []
+            context["last_reverse_source_query"] = None
             context["pending_recipe_web_search"] = {
                 "type": "recipe_web_search_offer",
                 "original_query": str(args.get("query") or user_text),
@@ -75,6 +86,8 @@ def update_context_from_trace(existing: dict | None, user_text: str, rag_trace: 
         output = str(latest_web.get("output_preview") or "")
         context["last_web_fallback_query"] = str(args.get("query") or user_text)
         context["last_web_fallback_summary"] = _summarize(output)
+        context["last_reverse_candidates"] = []
+        context["last_reverse_source_query"] = None
         context["pending_recipe_web_search"] = None
         context["pending_clarification"] = None
         context["updated_at"] = datetime.now().isoformat()
@@ -96,6 +109,9 @@ def render_recipe_context(context: dict | None) -> str:
         lines.append(f"- 最近联网兜底问题：{context['last_web_fallback_query']}")
     if context.get("last_web_fallback_summary"):
         lines.append(f"- 最近联网摘要：{context['last_web_fallback_summary']}")
+    reverse_candidates = context.get("last_reverse_candidates")
+    if isinstance(reverse_candidates, list) and reverse_candidates:
+        lines.append(f"- 最近反向查询候选菜：{'、'.join(str(item) for item in reverse_candidates if item)}")
     pending = context.get("pending_recipe_web_search") if isinstance(context.get("pending_recipe_web_search"), dict) else None
     if pending and pending.get("original_query"):
         lines.append(f"- 待确认联网菜谱问题：{pending['original_query']}")
@@ -127,6 +143,21 @@ def _dish_from_trace_or_output(trace: dict, output: str) -> str:
         if match:
             return match.group(1).strip()
     return ""
+
+
+def _reverse_candidates_from_output(output: str) -> list[str]:
+    text = str(output or "")
+    if "query_type: entity_lookup" not in text and '"plan_type": "entity_lookup"' not in text:
+        return []
+    candidates: list[str] = []
+    for dish in re.findall(r'"dish_name"\s*:\s*"([^"]+)"', text):
+        if dish and dish not in candidates:
+            candidates.append(dish)
+    for dish in re.findall(r"^\s*\d+[.、]\s*([^（(\n\r]{1,30})", text, flags=re.MULTILINE):
+        dish = dish.strip()
+        if dish and dish not in candidates:
+            candidates.append(dish)
+    return candidates
 
 
 def _recipe_result_is_success(output: str) -> bool:

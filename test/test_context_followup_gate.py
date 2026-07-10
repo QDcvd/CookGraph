@@ -9,6 +9,11 @@ class ContextFollowupGateTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "new_task")
 
+    def test_explicit_recipe_with_specific_method_wording_does_not_inherit(self):
+        decision = decide_context_followup("香菇炖鸡的具体做法", last_dish="辣椒炒肉")
+
+        self.assertEqual(decision.action, "new_task")
+
     def test_reverse_ingredient_query_does_not_inherit_last_dish(self):
         decision = decide_context_followup("牛肉有多少种做法", last_dish="玉米排骨汤")
 

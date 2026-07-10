@@ -378,11 +378,53 @@ def _is_unsafe_partial_dish_match(query: str, dish_name: str, matched_text: str 
     if len(normalized_match) >= 4:
         return False
     action_markers = ("炒", "炖", "焖", "蒸", "煮", "炸", "煎", "烤", "拌", "煲")
-    if not any(marker in normalized_query for marker in action_markers):
+    recipe_request_markers = ("怎么做", "做法", "咋做", "如何做")
+    if not any(marker in normalized_query for marker in action_markers + recipe_request_markers):
         return False
     if normalized_query == normalized_match:
         return False
     return True
+
+
+IDENTITY_LIMITERS = (
+    "拉丝",
+    "拔丝",
+    "酸辣",
+    "酸甜",
+    "糖醋",
+    "红烧",
+    "可乐",
+    "凉拌",
+    "麻婆",
+    "宫保",
+    "宫爆",
+    "鱼香",
+    "椒盐",
+    "咖喱",
+    "黑椒",
+    "白灼",
+    "清蒸",
+)
+
+
+def _has_unpreserved_identity_limiter(query: str, dish_name: str, document: str, matched_text: str | None) -> bool:
+    """A partial ingredient hit must not drop dish-defining modifiers from the query."""
+    if not matched_text:
+        return False
+    normalized_query = _normalize_text(query)
+    normalized_match = _normalize_text(matched_text)
+    normalized_dish = _normalize_text(dish_name)
+    if normalized_match == normalized_dish:
+        return False
+    normalized_document = _normalize_text(document)
+    for limiter in IDENTITY_LIMITERS:
+        normalized_limiter = _normalize_text(limiter)
+        if normalized_limiter not in normalized_query:
+            continue
+        if normalized_limiter in normalized_dish or normalized_limiter in normalized_document:
+            continue
+        return True
+    return False
 
 
 def rewrite_query_with_dish(original_query: str, dish_name: str, matched_text: str | None = None) -> str:
@@ -434,8 +476,11 @@ def semantic_match_recipe(
     margin = best_score - second_score
     accepted = best_score >= min_score and margin >= min_margin
     document_by_name = dict(zip(names, documents))
-    matched_text = _find_matched_text(text, best_name, document_by_name.get(best_name, ""))
+    best_document = document_by_name.get(best_name, "")
+    matched_text = _find_matched_text(text, best_name, best_document)
     if accepted and _is_unsafe_partial_dish_match(text, best_name, matched_text):
+        accepted = False
+    if accepted and _has_unpreserved_identity_limiter(text, best_name, best_document, matched_text):
         accepted = False
     rewritten_query = rewrite_query_with_dish(text, best_name, matched_text)
 

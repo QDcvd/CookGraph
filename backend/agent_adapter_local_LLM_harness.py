@@ -67,6 +67,8 @@ FINAL_ANSWER_TIMEOUT_SECONDS = 180
 DEFAULT_LLM_MODEL = "qwen3-4b"
 LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 2048)
 LLM_NO_THINK = _env_bool("LLM_NO_THINK", True)
+INTENT_ROUTER_NO_THINK = _env_bool("INTENT_ROUTER_NO_THINK", False)
+FINAL_ANSWER_NO_THINK = _env_bool("FINAL_ANSWER_NO_THINK", True)
 MAX_MODEL_LEN = _env_int("MAX_MODEL_LEN", _env_int("LLM_MAX_MODEL_LEN", 32768))
 MAX_TOOL_TURNS = _env_int("MAX_TOOL_TURNS", 10)
 MAX_TOTAL_TOOL_CALLS = _env_int("MAX_TOTAL_TOOL_CALLS", 16)
@@ -182,7 +184,7 @@ def _build_tool_loop_system_prompt(tools: list[Any]) -> str:
         f"{_build_tool_inventory_prompt(tools)}\n\n"
         "工具调用协议：\n"
         "- 运行时已经把上面的工具作为结构化 tools schema 传给模型；需要工具时必须发起正式 tool_call，不要在文字里假装调用。\n"
-        "- 当前使用 /no_think 模式，请不要输出隐藏推理过程，把 token 留给工具调用和最终答案。\n"
+        "- 这是意图判断与工具调用阶段，可以先认真判断用户真实意图；不要把内部推理写进最终给用户的回答。\n"
         "- 回答用户时保持亲切、自然、简洁；遇到未命中、缺少信息或需要追问时，不要用系统错误口吻，先说明你理解用户想做什么，再说明当前限制，并给出下一步选择。\n"
         "- 如果用户明确点名某个工具，就调用该工具。\n"
         "- 工具名必须使用精确注册名：recipe_query_tool 或 web_search_tool；不要输出 recipe_query、recipe、search 等不存在的别名。\n"
@@ -255,6 +257,57 @@ def _last_dish_from_history(history: list[dict]) -> str:
         if isinstance(hybrid, dict) and hybrid.get("standard_dish"):
             return str(hybrid.get("standard_dish")).strip()
     return ""
+
+
+def _last_reverse_candidates_from_history(history: list[dict]) -> list[str]:
+    for item in reversed(history):
+        trace = item.get("rag_trace")
+        if not isinstance(trace, dict):
+            continue
+        for call in reversed(trace.get("tool_calls") or []):
+            if not isinstance(call, dict):
+                continue
+            if str(call.get("tool_name") or call.get("name")) != "recipe_query_tool":
+                continue
+            output = str(call.get("output_preview") or "")
+            if "query_type: entity_lookup" not in output and '"plan_type": "entity_lookup"' not in output:
+                continue
+            candidates: list[str] = []
+            for dish in re.findall(r'"dish_name"\s*:\s*"([^"]+)"', output):
+                if dish and dish not in candidates:
+                    candidates.append(dish)
+            for dish in re.findall(r"^\s*\d+[.、]\s*([^（(\n\r]{1,30})", output, flags=re.MULTILINE):
+                dish = dish.strip()
+                if dish and dish not in candidates:
+                    candidates.append(dish)
+            return candidates
+    return []
+
+
+def _looks_like_generic_recipe_followup(user_text: str) -> bool:
+    text = re.sub(r"\s+", "", str(user_text or ""))
+    if not text or len(text) > 18:
+        return False
+    if text in {"怎么做", "咋做", "如何做", "做法", "步骤", "步骤呢"}:
+        return True
+    markers = ("具体菜谱", "具体做法", "具体怎么做")
+    return any(marker in text for marker in markers)
+
+
+def _build_reverse_candidate_choice_prompt(candidates: list[str]) -> dict:
+    options = []
+    for index, dish in enumerate(candidates[:2]):
+        key = chr(ord("A") + index)
+        options.append({"key": key, "label": dish, "send_text": dish})
+    options.append({"key": "C", "label": "我自己输入", "custom": True})
+    return {
+        "id": "choice_reverse_candidates",
+        "type": "reverse_candidate_choice",
+        "question": f"刚才查到了多道菜：{'、'.join(candidates)}。请先告诉我你想看哪一道的具体做法。",
+        "options": options,
+        "pending_type": "reverse_candidate_choice",
+        "pending_payload": {"candidates": candidates},
+    }
 
 
 def _extract_recipe_topic(text: str) -> str:
@@ -374,7 +427,26 @@ def _contextual_recipe_query(user_text: str, history: list[dict]) -> str | None:
 
 def _contextual_recipe_action(user_text: str, history: list[dict]) -> dict | None:
     last_dish = _last_dish_from_history(history)
-    decision = decide_context_followup(user_text, last_dish=last_dish)
+    reverse_candidates = _last_reverse_candidates_from_history(history)
+    if not last_dish and len(reverse_candidates) > 1 and _looks_like_generic_recipe_followup(user_text):
+        prompt = _build_reverse_candidate_choice_prompt(reverse_candidates)
+        return {
+            "type": "content",
+            "content": prompt["question"],
+            "reason": "上一轮反向查询有多个候选，泛化追问必须先让用户选择",
+            "choice_prompt": prompt,
+            "pending_clarification": {
+                "type": "reverse_candidate_choice",
+                "payload": {"candidates": reverse_candidates},
+                "question": prompt["question"],
+                "reason": "多候选反向查询不能自动继承",
+            },
+        }
+    decision = decide_context_followup(
+        user_text,
+        last_dish=last_dish,
+        last_reverse_candidates=reverse_candidates,
+    )
     if decision.action == "inherit" and decision.rewritten_query:
         return {
             "type": "tool",
@@ -528,6 +600,13 @@ def _clarification_for_contextless_recipe_attr(user_text: str) -> str | None:
 
 
 def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None:
+    """Only handle stateful actions that must happen before the model/tool loop.
+
+    Broad recipe intent routing belongs to the normal tool loop and the
+    recipe query understanding layer. Keeping preflight narrow prevents short
+    phrases such as "牛肉做法" from being prematurely forced into a legacy
+    forward recipe lookup.
+    """
     if _looks_like_affirmative_web_search_reply(user_text):
         pending_web = _pending_recipe_web_search_from_history(history)
         if pending_web:
@@ -563,7 +642,12 @@ def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None
             "pending_clarification": pending,
             "choice_prompt": choice_prompt,
         }
-    if clarification.action == "execute":
+    clarification_reason = str(clarification.reason or "")
+    should_preflight_execute = (
+        clarification.tool_name == "web_search_tool"
+        or clarification_reason.startswith("用户确认")
+    )
+    if clarification.action == "execute" and should_preflight_execute:
         return {
             "type": "tool",
             "tool_name": clarification.tool_name or "recipe_query_tool",
@@ -574,22 +658,6 @@ def _preflight_recipe_action(user_text: str, history: list[dict]) -> dict | None
     if _looks_like_graph_dish_count_question(user_text):
         return {"type": "tool", "query": user_text, "reason": "本地图谱菜品数量统计"}
 
-    if _looks_like_reverse_ingredient_question(user_text):
-        return {"type": "tool", "query": user_text, "reason": "反向食材查询仅使用本地图谱"}
-
-    if _contains_current_dish_name(user_text):
-        return {"type": "tool", "query": user_text, "reason": "当前输入包含明确新菜名，覆盖旧上下文"}
-
-    if _looks_like_bare_recipe_name(user_text):
-        return {"type": "tool", "query": user_text, "reason": "裸菜式短语先查本地图谱"}
-
-    if _looks_like_recipe_attribute_with_dish_hint(user_text):
-        return {"type": "tool", "query": user_text, "reason": "菜谱属性问题含菜式线索，交由本地图谱语义归一"}
-
-    clarification = _clarification_for_contextless_recipe_attr(user_text)
-    if clarification:
-        return {"type": "content", "content": clarification}
-
     return None
 
 
@@ -598,6 +666,7 @@ async def _execute_web_fallback_after_recipe(
     messages: list[Any],
     trace: dict,
     tool_call_id: str,
+    history: list[dict] | None = None,
 ):
     """菜谱图谱未命中时，自动补一次公网搜索。"""
     fallback_call = {
@@ -606,7 +675,11 @@ async def _execute_web_fallback_after_recipe(
         "id": tool_call_id,
     }
     messages.append(AIMessage(content="", tool_calls=[fallback_call]))
-    executed_name, executed_args, content = await _execute_tool_call(fallback_call)
+    executed_name, executed_args, content = await _execute_tool_call(
+        fallback_call,
+        current_user_text=user_text,
+        history=history,
+    )
     _append_tool_result_to_trace(trace, executed_name, executed_args, content)
     messages.append(ToolMessage(content=content, tool_call_id=tool_call_id, name=executed_name))
     return executed_name, executed_args, content
@@ -629,11 +702,16 @@ async def _execute_forced_tool_call(
     tool_name: str,
     args: dict,
     call_id: str,
+    history: list[dict] | None = None,
 ) -> int:
     """Execute a tool call forced by deterministic routing. Returns call count."""
     call = {"name": tool_name, "args": args, "id": call_id}
     messages.append(AIMessage(content="", tool_calls=[call]))
-    executed_name, executed_args, content = await _execute_tool_call(call)
+    executed_name, executed_args, content = await _execute_tool_call(
+        call,
+        current_user_text=user_text,
+        history=history,
+    )
     _append_tool_result_to_trace(trace, executed_name, executed_args, content)
     tool_context.append({"tool_name": executed_name, "args": executed_args, "content": content})
     messages.append(ToolMessage(content=content, tool_call_id=call_id, name=executed_name))
@@ -646,6 +724,7 @@ async def _execute_forced_tool_call(
             messages,
             trace,
             f"{call_id}_web_fallback",
+            history,
         )
         tool_context.append({"tool_name": web_name, "args": web_args, "content": web_content})
         calls_used += 1
@@ -733,13 +812,23 @@ def _message_content_to_text(content: Any) -> str:
     return ""
 
 
-def _with_no_think(text: str) -> str:
-    if not LLM_NO_THINK:
+def _with_no_think(text: str, *, enabled: bool | None = None) -> str:
+    if enabled is None:
+        enabled = LLM_NO_THINK
+    if not enabled:
         return text
     stripped = text.lstrip()
     if stripped.startswith("/no_think"):
         return text
     return f"/no_think\n{text}"
+
+
+def _with_intent_thinking_mode(text: str) -> str:
+    return _with_no_think(text, enabled=INTENT_ROUTER_NO_THINK)
+
+
+def _with_final_answer_thinking_mode(text: str) -> str:
+    return _with_no_think(text, enabled=FINAL_ANSWER_NO_THINK)
 
 
 def _message_reasoning_to_text(chunk: AIMessageChunk) -> str:
@@ -855,7 +944,7 @@ def _build_missing_tool_router_prompt(user_text: str, history: list[dict]) -> li
         "4. 如果用户只是普通聊天、打招呼、问天气、问模型身份、写作或基于已有上下文已经能回答，返回 null。\n"
         "5. 参数必须尽量具体，不要用空对象敷衍。"
     )
-    return [SystemMessage(content=system), HumanMessage(content=_with_no_think(user))]
+    return [SystemMessage(content=system), HumanMessage(content=_with_intent_thinking_mode(user))]
 
 
 
@@ -1242,7 +1331,7 @@ def _build_tool_loop_messages(user_text: str, history: list[dict]) -> list[Any]:
             messages.append(("user", f"<历史工具上下文>\n{content}\n</历史工具上下文>"))
         elif role == "runtime_memory":
             messages.append(("user", str(content or "")))
-    messages.append(("user", _with_no_think(user_text)))
+    messages.append(("user", _with_intent_thinking_mode(user_text)))
     return messages
 
 
@@ -1273,7 +1362,7 @@ def _build_final_prompt(user_text: str, trace: dict, tool_context: list[dict], r
         f"- 已用工具：{[call.get('tool_name') for call in trace.get('tool_calls', [])]}\n"
         "请用中文写出亲切、干净、直接的最终回答。回答前自检：每一个步骤、时间、用量、调料都必须能在工具上下文中找到依据。"
     )
-    return [SystemMessage(content=system), HumanMessage(content=_with_no_think(user))]
+    return [SystemMessage(content=system), HumanMessage(content=_with_final_answer_thinking_mode(user))]
 
 
 def _runtime_memory_from_history(history: list[dict]) -> str:
@@ -1302,7 +1391,7 @@ def _build_route_prompt(user_text: str) -> list[Any]:
                 "不要解释，不要输出标点。"
             )
         ),
-        HumanMessage(content=_with_no_think(f"用户请求：\n{user_text}\n\n路由结果：")),
+        HumanMessage(content=_with_intent_thinking_mode(f"用户请求：\n{user_text}\n\n路由结果：")),
     ]
 
 
@@ -1391,7 +1480,7 @@ def _build_direct_chat_prompt(user_text: str, history: list[dict]) -> list[Any]:
             messages.append(("user", content))
         elif role == "assistant":
             messages.append(("ai", content))
-    messages.append(HumanMessage(content=_with_no_think(user_text)))
+    messages.append(HumanMessage(content=_with_final_answer_thinking_mode(user_text)))
     return messages
 
 
@@ -1504,6 +1593,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                     tool_name,
                     {"query": query},
                     "preflight_recipe_route",
+                    history,
                 )
                 async for event in _emit_final_answer_from_tool_context(answer_user_text, trace, tool_context, runtime_memory, token_tracker):
                     if event.get("type") == "token_usage":
@@ -1553,7 +1643,11 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                             },
                         }
                         messages.append(AIMessage(content="", tool_calls=[{"name": forced_tool_name, "args": forced_args, "id": f"textual_{turn_index}"}]))
-                        executed_name, executed_args, content = await _execute_tool_call(textual_call)
+                        executed_name, executed_args, content = await _execute_tool_call(
+                            textual_call,
+                            current_user_text=user_text,
+                            history=history,
+                        )
                         total_tool_calls += 1
                         _append_tool_result_to_trace(trace, executed_name, executed_args, content)
                         tool_context.append({"tool_name": executed_name, "args": executed_args, "content": content})
@@ -1582,6 +1676,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                     messages,
                                     trace,
                                     f"recipe_web_fallback_{turn_index}",
+                                    history,
                                 )
                                 total_tool_calls += 1
                                 tool_context.append({"tool_name": web_name, "args": _web_args, "content": web_content})
@@ -1621,6 +1716,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                 _tool_call_name(forced_call),
                                 _tool_call_args(forced_call),
                                 f"forced_missing_tool_{turn_index}",
+                                history,
                             )
                             async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory, token_tracker):
                                 if event.get("type") == "token_usage":
@@ -1700,7 +1796,11 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                             "detail": str(args),
                         },
                     }
-                    executed_name, executed_args, content = await _execute_tool_call(call)
+                    executed_name, executed_args, content = await _execute_tool_call(
+                        call,
+                        current_user_text=user_text,
+                        history=history,
+                    )
                     total_tool_calls += 1
                     _append_tool_result_to_trace(trace, executed_name, executed_args, content)
                     tool_context.append({"tool_name": executed_name, "args": executed_args, "content": content})
@@ -1729,6 +1829,7 @@ async def stream_search_agent(user_text: str, history: list[dict]):
                                 messages,
                                 trace,
                                 f"recipe_web_fallback_{turn_index}_{index}",
+                                history,
                             )
                             total_tool_calls += 1
                             tool_context.append({"tool_name": web_name, "args": _web_args, "content": web_content})
@@ -1790,6 +1891,33 @@ async def stream_search_agent(user_text: str, history: list[dict]):
     except asyncio.CancelledError:
         raise
     except Exception as e:
+        if _looks_like_tool_request(user_text):
+            fallback_tool = "web_search_tool" if any(
+                marker in user_text for marker in ("联网", "网上", "网络", "搜索", "搜一下", "查一下")
+            ) else "recipe_query_tool"
+            yield {
+                "type": "rag_step",
+                "step": {
+                    "label": f"模型路由失败，兜底调用：{fallback_tool}",
+                    "icon": "🧭",
+                    "detail": str(e),
+                },
+            }
+            total_tool_calls += await _execute_forced_tool_call(
+                user_text,
+                messages,
+                trace,
+                tool_context,
+                fallback_tool,
+                {"query": user_text},
+                "tool_loop_error_fallback",
+                history,
+            )
+            async for event in _emit_final_answer_from_tool_context(user_text, trace, tool_context, runtime_memory, token_tracker):
+                if event.get("type") == "token_usage":
+                    trace["token_usage"] = event.get("token_usage")
+                yield event
+            return
         trace["token_usage"] = token_tracker.snapshot(final=True)
         yield {"type": "error", "content": f"工具循环出错: {str(e)}"}
         yield {"type": "trace", "rag_trace": trace}

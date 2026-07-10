@@ -368,6 +368,274 @@ MULTITURN_TEST_CASES: list[dict[str, Any]] = [
             ),
         ],
     ),
+    dict(
+        id="memory_015",
+        category="memory",
+        description="真实会话：鲜虾反向查询后，明确新菜可乐鸡翅不能继承上一道虾菜",
+        expected_behavior=(
+            "第一轮鲜虾反向查询只列本地图谱里的虾菜；第二轮蒜蓉粉丝虾查具体做法；"
+            "第三轮可乐鸡翅是明确新菜，必须按可乐鸡翅重新查本地并联网兜底，不能继续回答蒜蓉粉丝虾"
+        ),
+        forbidden_behavior="把可乐鸡翅当成蒜蓉粉丝虾的上下文追问，或用本地虾菜替代可乐鸡翅",
+        turns=[
+            dict(
+                user="鲜虾可以用来做什么",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["鲜虾", "蒜蓉粉丝虾", "避风塘炒虾"],
+                forbid_keywords=["红烧肉", "可乐鸡翅"],
+            ),
+            dict(
+                user="蒜蓉粉丝虾怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["蒜蓉粉丝虾", "鲜虾", "粉丝", "蒜蓉"],
+                forbid_keywords=["可乐鸡翅", "红烧肉"],
+            ),
+            dict(
+                user="我想吃可乐鸡翅，要怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["可乐鸡翅"],
+                forbid_keywords=["根据本地菜谱图谱，蒜蓉粉丝虾可以这样做", "鲜虾剪去须脚", "蒜蓉酱"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_016",
+        category="memory",
+        description="真实会话：多个明确新菜连续出现时，旧的土豆弱匹配不能劫持后续问题",
+        expected_behavior=(
+            "拉丝土豆、酸甜排骨、红烧肉、酸辣土豆丝都应按当前用户输入重新路由；"
+            "不能因为第一轮弱匹配清炒土豆丝，就把后续酸甜排骨也回答成清炒土豆丝"
+        ),
+        forbidden_behavior="旧清炒土豆丝上下文污染后续新菜，或把酸甜/酸辣等关键限定忽略掉",
+        turns=[
+            dict(
+                user="我想吃拉丝土豆，要怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["拉丝土豆"],
+                forbid_keywords=["根据本地菜谱图谱，清炒土豆丝可以这样做"],
+                expect_web_fallback=True,
+            ),
+            dict(
+                user="我想吃酸甜排骨，要怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["酸甜排骨"],
+                forbid_keywords=["根据本地菜谱图谱，清炒土豆丝可以这样做", "清炒土豆丝可以这样做"],
+                expect_web_fallback=True,
+            ),
+            dict(
+                user="红烧肉有什么做法",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["红烧肉"],
+                forbid_keywords=["清炒土豆丝可以这样做", "酸甜排骨可以这样做"],
+                expect_web_fallback=True,
+            ),
+            dict(
+                user="红烧肉",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["红烧肉"],
+                forbid_keywords=["清炒土豆丝可以这样做", "香干炒肉可以这样做"],
+                expect_web_fallback=True,
+            ),
+            dict(
+                user="酸甜排骨的做法",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["酸甜排骨"],
+                forbid_keywords=["糖醋里脊", "清炒土豆丝可以这样做"],
+                expect_web_fallback=True,
+            ),
+            dict(
+                user="酸辣土豆丝怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["酸辣土豆丝"],
+                forbid_keywords=["根据本地菜谱图谱，清炒土豆丝可以这样做", "清炒土豆丝可以这样做"],
+                expect_web_fallback=True,
+            ),
+        ],
+    ),
+    dict(
+        id="memory_017",
+        category="memory",
+        description="真实会话：反向食材查询后，泛化追问具体菜谱应继承刚推荐的唯一菜",
+        expected_behavior=(
+            "第一轮生菜反向查询命中蒜蓉生菜；第二轮'具体菜谱是怎么样的'应继承蒜蓉生菜，"
+            "而不是把这句话当成新菜名去联网搜索"
+        ),
+        forbidden_behavior="忘记第一轮推荐的蒜蓉生菜，把'具体菜谱是怎么样的'当成新菜名或联网搜索",
+        turns=[
+            dict(
+                user="生菜可以做什么",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["生菜", "蒜蓉生菜"],
+                forbid_keywords=["白灼菜心", "干煸菜花"],
+            ),
+            dict(
+                user="具体菜谱是怎么样的",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                forbid_tools=["web_search_tool"],
+                expect_any_keywords=["蒜蓉生菜", "生菜", "蒜蓉"],
+                forbid_keywords=["本地菜谱图谱没有收录“具体菜谱是怎么样的”", "400道家常菜合集", "白灼菜心"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_018",
+        category="memory",
+        description="同风格扩展：反向查询返回多道虾菜后，泛化具体做法必须先追问选择",
+        expected_behavior="鲜虾反向查询返回多道菜；用户只说具体菜谱时，agent 应追问想看哪一道，不能随便选蒜蓉粉丝虾或避风塘炒虾",
+        forbidden_behavior="多候选未确认时擅自选择一道菜输出完整做法",
+        turns=[
+            dict(
+                user="鲜虾可以做什么",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["蒜蓉粉丝虾", "避风塘炒虾"],
+            ),
+            dict(
+                user="具体菜谱是怎么样的",
+                expected_action="ask_clarification",
+                forbid_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["蒜蓉粉丝虾", "避风塘炒虾", "哪一道"],
+                forbid_keywords=["鲜虾剪去须脚", "蒸锅水烧开", "避风塘炒虾可以这样做"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_019",
+        category="memory",
+        description="同风格扩展：唯一反向候选后，短句'具体做法'继承该菜",
+        expected_behavior="生菜只命中蒜蓉生菜；用户说具体做法时，应查询蒜蓉生菜完整做法",
+        forbidden_behavior="把具体做法当成新菜名搜索，或切到白灼菜心等其他菜",
+        turns=[
+            dict(
+                user="生菜可以做什么菜",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["蒜蓉生菜", "生菜"],
+                forbid_keywords=["白灼菜心"],
+            ),
+            dict(
+                user="具体做法",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                forbid_tools=["web_search_tool"],
+                expect_any_keywords=["蒜蓉生菜", "生菜", "蒜蓉"],
+                forbid_keywords=["本地菜谱图谱没有收录“具体做法”", "白灼菜心"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_020",
+        category="memory",
+        description="同风格扩展：本地菜谱后出现明确未知新菜，不能继承旧菜",
+        expected_behavior="蒜蓉粉丝虾后问可乐鸡翅，应按可乐鸡翅重新查并联网兜底",
+        forbidden_behavior="把可乐鸡翅当成蒜蓉粉丝虾的追问",
+        turns=[
+            dict(
+                user="蒜蓉粉丝虾怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["蒜蓉粉丝虾"],
+            ),
+            dict(
+                user="可乐鸡翅怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["可乐鸡翅"],
+                forbid_keywords=["根据本地菜谱图谱，蒜蓉粉丝虾可以这样做", "鲜虾剪去须脚"],
+            ),
+        ],
+    ),
+    dict(
+        id="memory_021",
+        category="memory",
+        description="同风格扩展：土豆弱匹配不能吞掉拔丝限定词",
+        expected_behavior="拔丝土豆是未知明确单菜谱，应本地未命中后联网，不应回答清炒土豆丝",
+        forbidden_behavior="只因土豆命中就输出清炒土豆丝做法",
+        turns=[
+            dict(
+                user="拔丝土豆怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["拔丝土豆"],
+                forbid_keywords=["根据本地菜谱图谱，清炒土豆丝可以这样做", "土豆去皮切0.2厘米细丝"],
+                expect_web_fallback=True,
+            ),
+        ],
+    ),
+    dict(
+        id="memory_022",
+        category="memory",
+        description="同风格扩展：红烧限定词不能被肉类相似菜覆盖",
+        expected_behavior="红烧排骨是未知明确单菜谱，应联网兜底，不能被排骨汤或炒肉类菜谱替代",
+        forbidden_behavior="用玉米排骨汤、香干炒肉等本地图谱菜替代红烧排骨",
+        turns=[
+            dict(
+                user="红烧排骨怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["红烧排骨"],
+                forbid_keywords=["根据本地菜谱图谱，玉米排骨汤可以这样做", "香干炒肉可以这样做"],
+                expect_web_fallback=True,
+            ),
+        ],
+    ),
+    dict(
+        id="memory_023",
+        category="memory",
+        description="同风格扩展：酸甜排骨不能被糖醋里脊替代",
+        expected_behavior="酸甜排骨是当前新菜，不能回答成糖醋里脊；本地未命中后应联网兜底",
+        forbidden_behavior="把酸甜排骨替换成糖醋里脊或旧上下文菜",
+        turns=[
+            dict(
+                user="糖醋里脊怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["糖醋里脊"],
+            ),
+            dict(
+                user="酸甜排骨的做法",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["酸甜排骨"],
+                forbid_keywords=["根据现有资料，我找到了一道符合“猪肉 + 酸甜味”条件的菜谱——糖醋里脊", "糖醋里脊可以这样做"],
+                expect_web_fallback=True,
+            ),
+        ],
+    ),
+    dict(
+        id="memory_024",
+        category="memory",
+        description="同风格扩展：酸辣土豆丝不能因土豆命中改写为清炒土豆丝",
+        expected_behavior="酸辣土豆丝未被本地图谱收录时，应联网兜底，不应输出清炒土豆丝",
+        forbidden_behavior="忽略酸辣限定词，把问题回答成清炒土豆丝",
+        turns=[
+            dict(
+                user="清炒土豆丝怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool"],
+                expect_any_keywords=["清炒土豆丝"],
+            ),
+            dict(
+                user="酸辣土豆丝怎么做",
+                expected_action="tool",
+                expect_tools=["recipe_query_tool", "web_search_tool"],
+                expect_any_keywords=["酸辣土豆丝"],
+                forbid_keywords=["根据本地菜谱图谱，清炒土豆丝可以这样做", "土豆去皮切0.2厘米细丝"],
+                expect_web_fallback=True,
+            ),
+        ],
+    ),
     # ═══════════════════════════════════════════
     # distraction 类 — 不被无关内容干扰
     # ═══════════════════════════════════════════

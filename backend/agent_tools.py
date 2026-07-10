@@ -190,7 +190,7 @@ def web_search_tool(query: str) -> str:
 
 @tool
 def recipe_query_tool(query: str) -> str:
-    """查询本地菜谱知识图谱；适用于菜品做法、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系、哪些菜用了某食材/技法等问题；query 直接传用户的自然语言问题。"""
+    """查询本地菜谱知识图谱；适用于菜品做法、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系、哪些菜用了某食材/技法等问题；query 可传用户自然语言问题，也可传简化 Cypher（如 MATCH (d:Dish {name:'小炒黄牛肉'}) RETURN d.prep_process）。"""
     return query_recipe_kg(query)
 
 

@@ -97,6 +97,136 @@ def _tool_arg_names(tool_name: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# 工具输入契约
+# ---------------------------------------------------------------------------
+
+_QUERY_TOOL_NAMES = {"recipe_query_tool", "web_search_tool"}
+_INVALID_QUERY_FRAGMENTS = {
+    "",
+    "{",
+    "}",
+    "[",
+    "]",
+    "(",
+    ")",
+    "\"",
+    "'",
+    "null",
+    "none",
+    "undefined",
+}
+_AFFIRMATIVE_REPLIES = {"是", "好", "好的", "可以", "行", "嗯", "对", "搜", "搜一下", "帮我搜", "帮我搜一下"}
+
+
+def _history_text(item: dict) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                value = part.get("text") or part.get("content")
+                if value:
+                    parts.append(str(value))
+            elif part:
+                parts.append(str(part))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _pending_query_from_history(history: list[dict] | None) -> str | None:
+    """从 runtime memory 或最近 trace 中恢复等待用户确认的原始查询。"""
+    for item in reversed(history or []):
+        trace = item.get("rag_trace") if isinstance(item, dict) else None
+        if isinstance(trace, dict):
+            pending_web = trace.get("pending_recipe_web_search")
+            if isinstance(pending_web, dict):
+                query = str(pending_web.get("original_query") or "").strip()
+                if query:
+                    return query
+            pending = trace.get("pending_clarification")
+            if isinstance(pending, dict):
+                payload = pending.get("payload")
+                if isinstance(payload, dict):
+                    query = str(payload.get("query") or payload.get("resolved_query") or payload.get("original_query") or "").strip()
+                    if query:
+                        return query
+
+        text = _history_text(item)
+        match = re.search(r"pending_recipe_web_search.*?original_query['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]", text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"original_query['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]", text)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _looks_like_invalid_query(value: Any) -> bool:
+    if not isinstance(value, str):
+        return True
+    query = value.strip()
+    if query.lower() in _INVALID_QUERY_FRAGMENTS:
+        return True
+    if len(query) <= 1:
+        return True
+    if re.fullmatch(r"[\W_]+", query, flags=re.UNICODE):
+        return True
+    if query.startswith("{") and not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", query):
+        return True
+    return False
+
+
+def _query_source_for_repair(current_user_text: str | None, history: list[dict] | None) -> str | None:
+    user_text = str(current_user_text or "").strip()
+    if user_text and user_text not in _AFFIRMATIVE_REPLIES:
+        return user_text
+    pending_query = _pending_query_from_history(history)
+    if pending_query:
+        return pending_query
+    return user_text or None
+
+
+def _normalize_tool_call_args(
+    tool_name: str,
+    args: dict,
+    *,
+    current_user_text: str | None = None,
+    history: list[dict] | None = None,
+) -> tuple[dict, str | None]:
+    """Validate and repair model-produced tool arguments before execution.
+
+    The model may produce structurally valid but semantically unusable arguments
+    such as {"query": "{"}. Query tools should receive a complete natural
+    language request, preferably the latest user utterance or a pending original
+    query after an affirmative reply.
+    """
+    if tool_name not in _QUERY_TOOL_NAMES:
+        return args, None
+
+    normalized = dict(args or {})
+    raw_query = normalized.get("query")
+    repair_source = _query_source_for_repair(current_user_text, history)
+
+    if _looks_like_invalid_query(raw_query):
+        if repair_source and not _looks_like_invalid_query(repair_source):
+            normalized["query"] = repair_source
+            return normalized, None
+        return normalized, "工具参数无效：query 必须是完整的自然语言问题，不能是空值、符号片段或 JSON 残片。"
+
+    if str(raw_query).strip() in _AFFIRMATIVE_REPLIES:
+        pending_query = _pending_query_from_history(history)
+        if pending_query:
+            normalized["query"] = pending_query
+            return normalized, None
+        return normalized, "工具参数无效：用户只是确认/同意，但当前上下文里没有可恢复的原始问题。"
+
+    normalized["query"] = str(raw_query).strip()
+    return normalized, None
+
+
+# ---------------------------------------------------------------------------
 # 文本式工具调用解析（兼容小模型把工具调用写成普通文本的场景）
 # ---------------------------------------------------------------------------
 
@@ -394,10 +524,24 @@ def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, conten
 # 工具执行
 # ---------------------------------------------------------------------------
 
-async def _execute_tool_call(call: Any) -> tuple[str, dict, str]:
+async def _execute_tool_call(
+    call: Any,
+    *,
+    current_user_text: str | None = None,
+    history: list[dict] | None = None,
+) -> tuple[str, dict, str]:
     """执行一次工具调用，返回（工具名、参数、结果文本）。"""
     tool_name = _tool_call_name(call)
     args = _tool_call_args(call)
+    args, validation_error = _normalize_tool_call_args(
+        tool_name,
+        args,
+        current_user_text=current_user_text,
+        history=history,
+    )
+    if validation_error:
+        return tool_name, args, validation_error
+
     tool_by_name = {getattr(item, "name", getattr(item, "__name__", "")): item for item in _get_tools()}
     selected = tool_by_name.get(tool_name)
     if selected is None:

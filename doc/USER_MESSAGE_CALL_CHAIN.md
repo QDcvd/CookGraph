@@ -1,6 +1,6 @@
 # 用户发消息后的调用链
 
-本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、确定性菜谱路由、Agent 工具循环，到 Query Understanding、结构化反向查询、菜谱混合召回、知识图谱查询、联网兜底、最终回答约束、SSE 回传和 SQLite 落库的完整链路。
+本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、确定性菜谱路由、Agent 工具循环、Clarification Gate、Context Followup Gate、Query Understanding、结构化反向查询、菜谱混合召回、知识图谱查询、联网兜底、最终回答约束、SSE 回传和 SQLite 落库的完整链路。
 
 ## 当前关键变化
 
@@ -8,22 +8,18 @@
 - 后端 `memory_store` 是运行期缓存，`data/memory.sqlite3` 是进程重启后的事实来源。
 - 用户消息写入后，会立即抽取长期偏好并写入 `preference_memory`。
 - 每轮请求都会构造 Zleap-lite runtime memory，注入长期偏好和当前 session 菜谱上下文。
-- `stream_search_agent()` 先跑 `_preflight_recipe_action()`，对无菜名属性追问、明确菜名覆盖旧上下文等高风险问题做确定性路由，再决定是否进入模型工具循环。
+- `stream_search_agent()` 先跑 `_preflight_recipe_action()`，包含三层决策：
+  1. **确认联网回复**：用户说"搜一下""好的"时，从 history 中提取上一轮待联网 query 执行
+  2. **上下文菜谱动作**：`_contextual_recipe_action()` 处理属性追问（"它蒸多久"）等快捷路由
+  3. **Clarification Gate**：`decide_clarification()` + `build_choice_prompt()`，对疑似错字菜名/正向推荐歧义/待联网确认等场景返回结构化追问（ChoicePromptCard）
 - `recipe_query_tool` 仍是唯一菜谱工具。Query Understanding、结构化反向查询、菜谱混合召回、别名改写都藏在这个工具内部。
 - `query_recipe_kg()` 现在有三层分流：
   1. **Query Plan 层**（`query_plan.py`）：处理实体查找和组合推荐
-  2. **Query Understanding 层**（`query_understanding.py`）：分类意图为 forward/reverse/ambiguous/non-recipe/forward-unknown
+  2. **Query Understanding 层**（`query_understanding.py`）：分类意图
   3. **旧链路**：别名改写 + 语义召回 + 旧 parser 正向查询
-- 反向查询（如"牛肉怎么做""哪些菜用了牛肉"）会先产出结构化 `QueryIntent(reverse_query)`，由 `execute_reverse_query()` 直接查图谱，不进入旧 parser。
-- 反向查询的归并值输出必须展示，如"归并食材：牛肉、黄牛肉、牛里脊、肥牛"。
-- 多类型歧义词（如"蒜蓉"）返回 `ambiguous_query`，不硬拆。
-- `_emit_final_answer_from_tool_context()` 有 4 级 grounded answer 兜底：
-  1. 联网兜底结果 → `_build_grounded_web_fallback_answer()`
-  2. 图谱未命中联网提议 → `_build_grounded_web_search_offer_answer()`
-  3. 本地图谱反向查询结果 → `_build_grounded_reverse_answer()`
-  4. 正向菜谱命中结果 → `_build_grounded_recipe_answer()`
-  5. 以上都不满足时 → content-only 模型
-- assistant 最终回答和本轮 `rag_trace` 会一起持久化；随后根据 trace 更新当前 session 的 `recipe_context_json`。
+- 反向查询通过 `execute_reverse_query()` 直接查图谱节点和边关系。
+- `_emit_final_answer_from_tool_context()` 新增 Choice Prompt 集成（web_search_choice_prompt），前端展示选择卡片。
+- assistant 最终回答和本轮 `rag_trace`（含 `token_usage` 和 `choice_prompt`）一起持久化。
 
 ## 0. 总流程图
 
@@ -52,10 +48,22 @@ flowchart TD
     P --> Q["SSE event_generator()"]
 
     Q --> R["stream_search_agent(user_text, history)"]
-    R --> R1["_preflight_recipe_action()<br/>确定性路由"]
-    R1 -->|预检命中| R2["_execute_forced_tool_call()<br/>跳过模型工具循环"]
-    R1 -->|预检未命中| S["工具循环模型<br/>recipe_query_tool + web_search_tool"]
-    R2 --> Z["_append_tool_result_to_trace()"]
+    R --> R1["_preflight_recipe_action()"]
+
+    R1 --> R1A{"确认联网回复?"}
+    R1A -->|是| R1B["提取 pending_recipe_web_search<br/>执行 web_search_tool"]
+    R1A -->|否| R1C{"上下文属性追问?"}
+    R1C -->|是| R1D["补充菜名后调 recipe_query_tool"]
+    R1C -->|否| R1E{"Clarification Gate<br/>decide_clarification()"}
+
+    R1E -->|ask| R1F["build_choice_prompt()<br/>返回结构化追问 + ChoicePromptCard"]
+    R1E -->|execute| R1G["执行确认后的工具调用"]
+    R1E -->|none| S["进入模型工具循环"]
+
+    R1B --> Z["_append_tool_result_to_trace()"]
+    R1D --> Z
+    R1F --> Y1["SSE choice_prompt event"]
+    R1G --> Z
 
     S --> T{"模型是否调用工具?"}
     T -->|结构化 tool_calls| U["_execute_tool_call()"]
@@ -67,52 +75,41 @@ flowchart TD
     X -->|recipe_query_tool| Y["query_recipe_kg(query)"]
     X -->|web_search_tool| Z1["DDGS().text()"]
 
-    Y --> YA["build_query_plan()<br/>实体查找/组合推荐"]
-    YA -->|plan 被支持| YB["execute_query_plan()<br/>+ compose_plan_result()"]
-    YA -->|plan 不被支持| YC["classify_intent()<br/>Query Understanding"]
+    Y --> YA["build_query_plan()"]
+    YA -->|plan 被支持| YB["execute_query_plan()+compose_plan_result()"]
+    YA -->|plan 不被支持| YC["classify_intent()"]
 
     YC --> YD{"intent 类型"}
-    YD -->|forward_recipe_query| YE["走别名改写 + 语义召回"]
-    YD -->|reverse_query| YF["execute_reverse_query()<br/>直接查图谱节点和边"]
-    YD -->|ambiguous_query| YG["format_ambiguous_query()<br/>返回结构化歧义"]
-    YD -->|non_recipe_query| YH["format_non_recipe()<br/>拒答"]
-    YD -->|forward_unknown_recipe_query| YI["走旧 parser 正向查询"]
-    YD -->|legacy_forward_parser| YI
+    YD -->|forward| YE["别名改写 + 语义召回"]
+    YD -->|reverse| YF["execute_reverse_query()"]
+    YD -->|ambiguous| YG["format_ambiguous_query()"]
+    YD -->|non_recipe| YH["format_non_recipe()"]
+    YD -->|forward_unknown| YI["旧 parser 正向"]
 
-    YF --> Z
-    YG --> Z
-    YH --> Z
-
-    YE --> YJ["_alias_rewrite_query()<br/>+ _semantic_rewrite_query()"]
-    YJ --> YK["RecipeQuerySystem.query()<br/>NetworkX 知识图谱"]
+    YF --> Z; YG --> Z; YH --> Z
+    YE --> YK["RecipeQuerySystem.query()"]
     YI --> YK
-
-    YK --> YL{"图谱是否未命中且允许联网兜底?"}
+    YK --> YL{"未命中且允许联网?"}
     YL -->|是| YM["_execute_web_fallback_after_recipe()"]
-    YM --> Z1
-    YL -->|否| Z
-    Z1 --> Z
+    YM --> Z1; YL -->|否| Z; Z1 --> Z
 
-    Z --> AA["_emit_final_answer_from_tool_context()<br/>4 级 grounded answer + 模型"]
-    AA --> AB{"grounded answer 命中?"}
+    Z --> AA["_emit_final_answer_from_tool_context()"]
+    AA --> AA1["提取 web_choice_prompt"]
+    AA1 --> AB{"grounded answer 命中?"}
     AB -->|联网兜底| AC["_build_grounded_web_fallback_answer()"]
     AB -->|联网提议| AD["_build_grounded_web_search_offer_answer()"]
     AB -->|反向查询| AE["_build_grounded_reverse_answer()"]
     AB -->|菜谱命中| AF["_build_grounded_recipe_answer()"]
-    AB -->|都不命中| AG["_stream_model_answer()<br/>content-only 模型"]
+    AB -->|都不命中| AG["_stream_model_answer()"]
 
-    AC --> AH["SSE trace / rag_step / content / token_usage"]
-    AD --> AH
-    AE --> AH
-    AF --> AH
-    AG --> AH
-    W --> AH
-    AH --> AI["前端解析 SSE<br/>更新文本、trace、检索过程"]
+    AC --> AH["SSE trace / rag_step / content / choice_prompt"]
+    AD --> AH; AE --> AH; AF --> AH; AG --> AH; W --> AH
+    AH --> AI["前端解析 SSE<br/>ChoicePromptCard / TokenUsageBadge"]
 
     Q --> AJ["流结束后收集 full_response + rag_trace + token_usage"]
-    AJ --> AK["add_message(..., ai, rag_trace)<br/>写内存 + chat_messages.rag_trace_json"]
-    AK --> AL["update_context_from_trace()<br/>更新最近菜品/联网摘要"]
-    AL --> AM["update_recipe_context()<br/>写 chat_sessions.recipe_context_json"]
+    AJ --> AK["add_message(..., ai, rag_trace)"]
+    AK --> AL["update_context_from_trace()"]
+    AL --> AM["update_recipe_context()"]
     AM --> AN["SSE [DONE]"]
 ```
 
@@ -129,7 +126,7 @@ flowchart TD
     G["用户点击历史会话"] --> H["chatStore.loadSession(session_id)"]
     H --> I["GET /sessions/{session_id}"]
     I --> J["memory_store.get_session(session_id)"]
-    J -->|缓存未命中| K["load_chat_session()<br/>读取 chat_messages"]
+    J -->|缓存未命中| K["load_chat_session()"]
     K --> L["hydrate 内存 session"]
     J -->|缓存命中| L
     L --> M["返回 messages"]
@@ -137,61 +134,31 @@ flowchart TD
 
     O["删除会话"] --> P["DELETE /sessions/{session_id}"]
     P --> Q["delete_session()"]
-    Q --> R["archive_chat_session()<br/>status='archived'"]
+    Q --> R["archive_chat_session()"]
 ```
 
-持久化表：
-
-```text
-data/memory.sqlite3
-  ├─ chat_sessions
-  │   ├─ id
-  │   ├─ title
-  │   ├─ status
-  │   ├─ recipe_context_json
-  │   ├─ created_at / updated_at
-  │   └─ archived_at
-  ├─ chat_messages
-  │   ├─ id
-  │   ├─ session_id
-  │   ├─ role: human / ai
-  │   ├─ content
-  │   ├─ rag_trace_json（含 token_usage）
-  │   └─ created_at / deleted_at
-  └─ preference_memory
-      └─ 跨会话用户偏好
-```
-
-## 0.2 Agent 工具决策 + 预检路由
+## 0.2 预检路由 + Clarification Gate
 
 ```mermaid
 flowchart TD
-    A["stream_search_agent(user_text, history)"] --> A1["_runtime_memory_from_history()"]
-    A1 --> A2["_build_tool_loop_messages()"]
-    A2 --> B["_preflight_recipe_action()<br/>确定性路由"]
+    A["_preflight_recipe_action(user_text, history)"] --> B{"_looks_like_affirmative_web_search_reply?"}
+    B -->|是| C["提取 pending_recipe_web_search<br/>返回 tool: web_search_tool"]
+    B -->|否| D["_contextual_recipe_action()"]
 
-    B --> B1{"是否匹配预检规则?"}
-    B1 -->|反向食材查询| B2["_execute_forced_tool_call()<br/>recipe_query_tool"]
-    B1 -->|明确新菜名覆盖| B2
-    B1 -->|裸菜式短语| B2
-    B1 -->|上下文属性追问| B3["补充菜名后调用工具"]
-    B1 -->|缺菜名澄清| B4["直接生成澄清回答"]
-    B1 -->|未匹配| C["进入模型工具循环"]
+    D --> E{"是否上下文属性追问?"}
+    E -->|是| F["补充菜名后调 recipe_query_tool"]
+    E -->|否| G["decide_clarification()<br/>clarification_gate.py"]
 
-    B2 --> D["_append_tool_result_to_trace()"]
-    B3 --> D
-    D --> E["_emit_final_answer_from_tool_context()"]
+    G --> H{"action 类型"}
+    H -->|ask| I["build_choice_prompt()<br/>选择卡片"]
+    H -->|execute| J["执行确认后的工具"]
+    H -->|none| K["返回 None<br/>进入模型工具循环"]
 
-    C --> F["get_tool_bound_model()<br/>model.ainvoke(messages)"]
-    F --> G{"AIMessage 有 tool_calls?"}
-    G -->|有| H["逐个执行 tool_call"]
-    G -->|没有| I["读取 raw_output"]
-    I --> J{"像文本式工具调用?"}
-    J -->|是| K["_parse_textual_tool_call()"]
-    J -->|否| L["普通文本回答 / SSE content"]
-    K --> H
-    H --> M["_append_tool_result_to_trace()"]
-    M --> E
+    I --> L["返回 content + pending_clarification + choice_prompt"]
+    J --> M["返回 tool 指令"]
+    K --> N["stream_search_agent 继续"]
+
+    C --> M; F --> M
 ```
 
 ## 0.3 query_recipe_kg 内部链路
@@ -200,42 +167,35 @@ flowchart TD
 flowchart TD
     A["query_recipe_kg(query)"] --> B{"query 为空?"}
     B -->|是| B1["返回错误"]
-    B -->|否| C{"KG 文件存在?"}
-    C -->|否| C1["返回错误"]
-    C -->|是| D["_get_recipe_system()"]
+    B -->|否| C["_get_recipe_system()"]
 
-    D --> D1["build_query_plan()"]
-
+    C --> D1["build_query_plan()"]
     D1 --> D2{"plan.supported?"}
-    D2 -->|是| D3["execute_query_plan()"]
-    D3 --> D4["compose_plan_result()"]
-    D4 --> DONE["返回结构化结果"]
-
+    D2 -->|是| D3["execute_query_plan()+compose_plan_result()"]
     D2 -->|否| E["classify_intent()"]
 
-    E --> F{"intent 类型"}
-    F -->|non_recipe_query| G1["format_non_recipe()"]
-    F -->|ambiguous_query| G2["format_ambiguous_query()"]
-    F -->|reverse_query| G3["execute_reverse_query()"]
-    F -->|forward_recipe_query| G4["进入正向链路"]
-    F -->|forward_unknown_recipe_query| G4
-    F -->|legacy_forward_parser| G4
+    E --> F{"intent"}
+    F -->|non_recipe| G1["format_non_recipe()"]
+    F -->|ambiguous| G2["format_ambiguous_query()"]
+    F -->|reverse| G3["execute_reverse_query()"]
+    F -->|forward| G4["正向链路"]
+    F -->|forward_unknown| G4
+    F -->|legacy| G4
 
     G3 --> G3a["确定 target_type + relation"]
-    G3a --> G3b["图谱实体归一 + alias 展开"]
+    G3a --> G3b["图谱实体归一"]
     G3b --> G3c["遍历菜品边关系"]
     G3c --> G3d["返回结构化摘要"]
     G3d --> DONE
-    G1 --> DONE
-    G2 --> DONE
+    G1 --> DONE; G2 --> DONE
 
     G4 --> H["旧反向兜底"]
-    H -->|未命中| I["别名改写 + 语义召回"]
+    H --> I["别名改写 + 语义召回"]
     I --> J["RecipeQuerySystem.query()"]
-    J --> K{"图谱未命中且允许联网?"}
+    J --> K{"未命中且允许联网?"}
     K -->|是| L["标记 fallback_needed"]
     K -->|否| M["格式化为 human_readable"]
-    M --> DONE
+    M --> DONE; D3 --> DONE
 ```
 
 ## 0.4 runtime memory 注入链路
@@ -246,7 +206,6 @@ flowchart TD
     B --> C["build_agent_history(all_msgs[:-1])"]
     C --> D["保留最近 12 条消息"]
     D --> E["AI 消息的 rag_trace 展开为<br/>assistant_tool_call + tool result"]
-
     A --> F["list_preferences()"]
     A --> G["get_recipe_context(session_id)"]
     F --> H["render_preferences_for_memory()"]
@@ -261,32 +220,25 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["_emit_final_answer_from_tool_context()"] --> B["检查 tool_context"]
+    A["_emit_final_answer_from_tool_context()"] --> A1["提取 web_choice_prompt"]
+    A1 --> B["检查 tool_context"]
 
     B --> C{"有 web_search_tool 结果?"}
     C -->|是| D["_build_grounded_web_fallback_answer()"]
-    D --> E["直接 yield content"]
-
-    C -->|否| F{"有 web_search_offer?"}
-    F -->|是| G["_build_grounded_web_search_offer_answer()"]
-    G --> E
-
-    F -->|否| H{"仅反向查询?"}
-    H -->|是| I["_build_grounded_reverse_answer()"]
-    I --> E
-
-    H -->|否| J{"正向菜谱结果?"}
-    J -->|是| K["_build_grounded_recipe_answer()"]
-    K --> E
-
-    J -->|否| L["_stream_model_answer()<br/>content-only 模型"]
-    L --> M{"超时或异常?"}
-    M -->|是| N["_build_partial_tool_answer()"]
-    N --> E
-    M -->|否| O["SSE content"]
+    C -->|否| E{"有 web_search_offer?"}
+    E -->|是| F["_build_grounded_web_search_offer_answer()"]
+    E -->|否| G{"仅反向查询?"}
+    G -->|是| H["_build_grounded_reverse_answer()"]
+    G -->|否| I{"正向菜谱结果?"}
+    I -->|是| J["_build_grounded_recipe_answer()"]
+    I -->|否| K["_stream_model_answer()"]
+    K --> L{"超时或异常?"}
+    L -->|是| M["_build_partial_tool_answer()"]
+    D --> N["直接 yield content + token_usage"]
+    F --> N; H --> N; J --> N; M --> N; L -->|否| O["SSE content"]
 ```
 
-## 0.6 SSE 回传与前端渲染
+## 0.6 SSE 事件与前端渲染
 
 ```mermaid
 flowchart TD
@@ -295,49 +247,47 @@ flowchart TD
     B -->|trace| D["完整 rag_trace"]
     B -->|thinking| E["模型思考片段"]
     B -->|content| F["最终回答片段"]
-    B -->|token_usage| G["token 用量"]
-    B -->|session_title| H["更新会话标题"]
-    B -->|error| I["错误信息"]
-    B -->|DONE| J["结束流"]
+    B -->|token_usage| G["Token 用量"]
+    B -->|choice_prompt| H["选择卡片"]
+    B -->|session_title| I["更新会话标题"]
+    B -->|error| J["错误信息"]
+    B -->|DONE| K["结束流"]
 
-    C --> K["chatStore.handleSend()<br/>解析 SSE"]
-    D --> K; E --> K; F --> K; G --> K; H --> K; I --> K
-    K --> L{"前端按 type 分发"}
-    L -->|rag_step| M["追加 msg.ragSteps"]
-    L -->|trace| N["写入 msg.ragTrace"]
-    L -->|thinking| O["追加过程展示"]
-    L -->|content| P["追加 assistant 正文"]
-    L -->|token_usage| Q["更新 TokenUsageBadge"]
-    L -->|session_title| R["更新 sessions 列表"]
-    L -->|error| S["展示 Error"]
-    J --> T["isLoading=false"]
+    C --> L["chatStore.handleSend() 解析 SSE"]
+    D --> L; E --> L; F --> L; G --> L; H --> L; I --> L; J --> L
+    L --> M{"前端按 type 分发"}
+    M -->|rag_step| N["追加 msg.ragSteps"]
+    M -->|trace| O["写入 msg.ragTrace"]
+    M -->|thinking| P["追加过程展示"]
+    M -->|content| Q["追加 assistant 正文"]
+    M -->|token_usage| R["更新 TokenUsageBadge"]
+    M -->|choice_prompt| S["显示 ChoicePromptCard"]
+    M -->|session_title| T["更新 sessions 列表"]
+    M -->|error| U["展示 Error"]
+    K --> V["isLoading=false"]
 ```
 
 ## 1. 关键文件
 
 ```text
-frontend/src/stores/chat.ts           # handleSend() SSE 解析
-  → backend/app.py                     # POST /chat/stream
-    → backend/memory_store.py          # session 缓存 / SQLite 双写
-    → backend/chat_persistence.py      # SQLite 层
-    → backend/context_manager.py       # 历史 + runtime memory
-    → backend/preference_memory.py     # 用户偏好
+frontend/src/stores/chat.ts
+  → backend/app.py
+    → backend/memory_store.py / chat_persistence.py
+    → backend/context_manager.py
     → backend/session_recipe_context.py
     → backend/agent_adapter_local_LLM_harness.py
       → _preflight_recipe_action()
+        → clarification_gate.py / context_followup_gate.py
       → stream_search_agent()
         → recipe_query_tool
           → backend/recipe_query_adapter.py
             → backend/query_plan.py
             → backend/query_understanding.py
-            → backend/query_executor.py
-            → backend/answer_composer.py
+            → backend/query_executor.py / answer_composer.py
             → backend/recipe_semantic_retriever.py
-            → backend/4-V1菜谱查询recipe_query-查询火力.py
         → web_search_tool
       → _emit_final_answer_from_tool_context()
-        → 4 级 grounded answer / _stream_model_answer()
+        → grounded answer cascade
     → backend/token_usage_tracker.py
-    → update_context_from_trace()
-    → update_recipe_context()
+    → update_context_from_trace() / update_recipe_context()
 ```

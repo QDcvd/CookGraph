@@ -243,6 +243,17 @@ def resolve_pending_clarification(user_text: str, pending: dict | None) -> Clari
                 reason="用户确认按单菜谱处理",
             )
 
+    if pending_type == "reverse_candidate_choice":
+        candidates = [str(item).strip() for item in payload.get("candidates", []) if str(item).strip()]
+        for candidate in candidates:
+            if candidate and (candidate in user_text or _normalize(candidate) == text):
+                return ClarificationDecision(
+                    action="execute",
+                    tool_name="recipe_query_tool",
+                    query=f"{candidate}怎么做",
+                    reason="用户从反向查询候选中选择了具体菜",
+                )
+
     return None
 
 
@@ -297,6 +308,11 @@ def _compound_preference_query(text: str) -> dict[str, str] | None:
         return None
     taste = next((word for word in TASTE_WORDS if word in text), "")
     ingredient = next((word for word in RECIPE_ENTITY_WORDS if word in text), "")
+    if taste and ingredient:
+        topic = re.split(r"(?:怎么做|做法)", text, maxsplit=1)[0]
+        topic = topic.rstrip("的")
+        if topic != f"{taste}{ingredient}":
+            return None
     if taste and ingredient:
         return {"taste": taste, "ingredient": ingredient}
     return None
