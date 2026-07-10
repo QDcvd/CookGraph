@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Query Understanding 单元测试 — 不加载 LLM，只测意图分类。
+"""Query Understanding 单元测试 — LLM 路由解析 + 格式化函数 + 保底分类。
 
-用法：
-    PYTHONIOENCODING=utf-8 python test/test_query_understanding.py
+测试分类器本身（_parse_router_json、_fallback_classify）是纯代码，不依赖 LLM。
+需要 LLM 的 classify_intent 集成测试放在 replay 脚本中。
 """
 
 import sys
@@ -14,133 +14,100 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from backend.query_understanding import (
+    QueryIntent,
     classify_intent,
     format_ambiguous_query,
     format_non_recipe,
+    _parse_router_json,
+    _fallback_classify,
 )
 
 
-class TestClassifyIntent(unittest.TestCase):
-    """意图分类测试 — 见 doc/query_understanding_refactor_plan.md"""
+class TestParseRouterJson(unittest.TestCase):
+    """LLM 返回 JSON 的解析器测试（纯逻辑，不调 LLM）。"""
 
-    maxDiff = None
+    def test_plain_json(self):
+        result = _parse_router_json('{"intent": "forward_recipe_query", "dish_name": "清蒸鲈鱼", "confidence": 0.95}')
+        self.assertIsNotNone(result)
+        self.assertEqual(result["intent"], "forward_recipe_query")
+        self.assertEqual(result["dish_name"], "清蒸鲈鱼")
 
-    def _classify(self, text: str, dish_names: set[str] | None = None):
-        return classify_intent(text, dish_names=dish_names or _DISH_NAMES)
+    def test_fenced_json(self):
+        result = _parse_router_json('```json\n{"intent": "reverse_query", "target_type": "ingredient", "target_text": "牛肉"}\n```')
+        self.assertIsNotNone(result)
+        self.assertEqual(result["intent"], "reverse_query")
+        self.assertEqual(result["target_type"], "ingredient")
 
-    def test_forward_recipe_query(self):
-        """明确菜名 -> forward_recipe_query"""
-        for query in ["小炒黄牛肉怎么做", "番茄炒蛋怎么做", "清蒸鲈鱼怎么做"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "forward_recipe_query", query)
-
-    def test_forward_alias_query(self):
-        """别名命中 -> forward_recipe_query"""
-        intent = self._classify("西红柿炒鸡蛋怎么做")
-        self.assertEqual(intent.intent, "forward_recipe_query")
-
-    def test_unknown_single_recipe_is_not_reverse_by_ingredient_substring(self):
-        """未知菜名里含食材词，不应被截成反向食材查询。"""
-        for query in ["洋葱炒牛肉的做法", "红烧排骨怎么做", "麻婆豆腐", "凉拌木耳怎么做"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "forward_unknown_recipe_query", query)
-
-    def test_unknown_recipe_attribute_request_is_not_reverse_query(self):
-        """想做某道菜并询问调味/配菜，应按单菜谱属性请求处理。"""
-        intent = self._classify("我想做十豆炖鸡，需要准备哪些调味料和配菜?")
-        self.assertEqual(intent.intent, "forward_unknown_recipe_query")
-        self.assertNotEqual(intent.target_type, "taste")
-
-    def test_reverse_ingredient_query(self):
-        """食材反向 -> reverse_query / ingredient"""
-        for query in ["牛肉怎么做", "虾怎么做", "莲藕怎么做好吃"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "reverse_query", query)
-                self.assertEqual(intent.target_type, "ingredient", query)
-
-    def test_reverse_short_ingredient(self):
-        """短词食材 -> reverse_query / ingredient"""
-        for query in ["花甲", "肥牛", "鸡蛋", "莲藕", "包菜"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "reverse_query", query)
-                self.assertEqual(intent.target_type, "ingredient", query)
-
-    def test_reverse_cuisine(self):
-        """菜系反向 -> reverse_query / cuisine"""
-        for query in ["川菜", "湘菜"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "reverse_query", query)
-                self.assertEqual(intent.target_type, "cuisine", query)
-
-    def test_reverse_taste(self):
-        """口味反向 -> reverse_query / taste"""
-        for query in ["香辣味"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "reverse_query", query)
-                self.assertEqual(intent.target_type, "taste", query)
-
-    def test_reverse_technique(self):
-        """技法反向 -> reverse_query / technique"""
-        for query in ["蒸制", "爆炒"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "reverse_query", query)
-                self.assertEqual(intent.target_type, "technique", query)
-
-    def test_reverse_pattern_哪些菜用了(self):
-        """哪些菜用了某食材 -> reverse_query / ingredient"""
-        for query in ["哪些菜用了牛肉", "哪些菜用了莲藕"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "reverse_query", query)
-                self.assertEqual(intent.target_type, "ingredient", query)
-
-    def test_reverse_pattern_有什么菜(self):
-        """有什么菜推荐 -> reverse_query / cuisine"""
-        intent = self._classify("有什么川菜推荐")
-        self.assertEqual(intent.intent, "reverse_query")
-        self.assertEqual(intent.target_type, "cuisine")
-
-    def test_reverse_pattern_是香辣味的(self):
-        """哪些菜是香辣味的 -> reverse_query / taste"""
-        intent = self._classify("哪些菜是香辣味的")
-        self.assertEqual(intent.intent, "reverse_query")
-        self.assertEqual(intent.target_type, "taste")
-
-    def test_reverse_pattern_是蒸制的(self):
-        """有哪些菜是蒸制的 -> reverse_query / technique"""
-        intent = self._classify("有哪些菜是蒸制的")
-        self.assertEqual(intent.intent, "reverse_query")
-        self.assertEqual(intent.target_type, "technique")
-
-    def test_ambiguous_query(self):
-        """歧义词 -> ambiguous_query"""
-        intent = self._classify("蒜蓉")
-        self.assertEqual(intent.intent, "ambiguous_query")
-        self.assertIsNotNone(intent.candidates)
-
-    def test_non_recipe_query(self):
-        """非菜谱 -> non_recipe_query"""
-        for query in ["你好", "今天天气怎么样", "你是什么模型"]:
-            with self.subTest(query=query):
-                intent = self._classify(query)
-                self.assertEqual(intent.intent, "non_recipe_query", query)
+    def test_fenced_without_lang(self):
+        result = _parse_router_json('```\n{"intent": "non_recipe_query"}\n```')
+        self.assertIsNotNone(result)
+        self.assertEqual(result["intent"], "non_recipe_query")
 
     def test_empty_input(self):
-        """空输入 -> non_recipe_query"""
+        self.assertIsNone(_parse_router_json(""))
+        self.assertIsNone(_parse_router_json("   "))
+        self.assertIsNone(_parse_router_json(None))
+
+    def test_broken_json(self):
+        self.assertIsNone(_parse_router_json('{"intent": broken}'))
+
+    def test_followup_resolved_query(self):
+        result = _parse_router_json(
+            '{"intent": "recipe_followup_query", "resolved_query": "香煎豆腐怎么做", "confidence": 0.88}'
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["intent"], "recipe_followup_query")
+        self.assertEqual(result["resolved_query"], "香煎豆腐怎么做")
+
+
+class TestFallbackClassify(unittest.TestCase):
+    """LLM 不可用时的保底分类测试。"""
+
+    def _fb(self, text: str, dish_names: set[str] | None = None):
+        return _fallback_classify(text, dish_names or _DISH_NAMES)
+
+    def test_greeting(self):
+        for q in ["你好", "您好", "你是谁"]:
+            with self.subTest(query=q):
+                intent = self._fb(q)
+                self.assertEqual(intent.intent, "greeting", q)
+                self.assertGreaterEqual(intent.confidence, 0.8)
+
+    def test_non_recipe_keyword(self):
+        for q in ["今天天气怎么样", "帮我查一下股票"]:
+            with self.subTest(query=q):
+                intent = self._fb(q)
+                self.assertEqual(intent.intent, "non_recipe_query", q)
+
+    def test_forward_recipe_by_dish_name(self):
+        for q in ["小炒黄牛肉怎么做", "清蒸鲈鱼的做法"]:
+            with self.subTest(query=q):
+                intent = self._fb(q)
+                self.assertEqual(intent.intent, "forward_recipe_query", q)
+
+    def test_forward_by_alias(self):
+        intent = self._fb("西红柿炒鸡蛋怎么做")
+        self.assertEqual(intent.intent, "forward_recipe_query")
+
+    def test_reverse_marker(self):
+        for q in ["哪些菜用了牛肉", "有哪些菜是川菜"]:
+            with self.subTest(query=q):
+                intent = self._fb(q)
+                self.assertEqual(intent.intent, "reverse_query", q)
+
+    def test_cooking_marker(self):
+        for q in ["老豆腐的做法", "洋葱炒牛肉怎么做"]:
+            with self.subTest(query=q):
+                intent = self._fb(q)
+                self.assertEqual(intent.intent, "forward_unknown_recipe_query", q)
+
+    def test_empty_input(self):
         intent = classify_intent("")
         self.assertEqual(intent.intent, "non_recipe_query")
 
-    def test_legacy_forward_parser(self):
-        """无明确模式 -> legacy_forward_parser"""
-        intent = self._classify("这是一个完全随机的测试文本")
-        self.assertEqual(intent.intent, "legacy_forward_parser")
+    def test_random_text_default(self):
+        intent = self._fb("这是一个完全随机的测试文本")
+        self.assertEqual(intent.intent, "forward_unknown_recipe_query")
 
 
 class TestFormatFunctions(unittest.TestCase):
@@ -150,7 +117,6 @@ class TestFormatFunctions(unittest.TestCase):
         self.assertIn("out_of_scope", result)
 
     def test_format_ambiguous(self):
-        from backend.query_understanding import QueryIntent
         intent = QueryIntent(
             intent="ambiguous_query",
             candidates=[
@@ -163,9 +129,22 @@ class TestFormatFunctions(unittest.TestCase):
         self.assertIn("ambiguous", result)
         self.assertIn("蒜蓉", result)
 
+    def test_format_ambiguous_no_candidates(self):
+        intent = QueryIntent(intent="ambiguous_query")
+        result = format_ambiguous_query(intent)
+        self.assertIn("success: False", result)
 
-# ⚠️ 测试用的菜名列表 —— 需要与本地图谱一致
-# 这些菜名必须存在于 config/chem+recipe_kg_updated_fire.pkl 中
+    def test_format_non_recipe_contains_out_of_scope(self):
+        result = format_non_recipe("今天天气")
+        self.assertIn("out_of_scope", result)
+
+    def test_format_ambiguous_contains_ambiguous(self):
+        intent = QueryIntent(intent="ambiguous_query", candidates=[{"target_type": "ingredient", "target_text": "蒜蓉"}])
+        result = format_ambiguous_query(intent)
+        self.assertIn("ambiguous", result)
+
+
+# ⚠️ 测试用的菜名列表
 _DISH_NAMES = {
     "小炒黄牛肉", "番茄炒蛋", "清蒸鲈鱼", "糖醋里脊",
     "鱼香肉丝", "可乐鸡翅", "干锅肥肠", "手撕包菜",

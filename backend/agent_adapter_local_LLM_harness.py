@@ -31,6 +31,7 @@ from backend.clarification_gate import (
     decide_clarification,
 )
 from backend.recipe_query_adapter import kg_dish_names
+from backend.query_router import route_query
 from backend.token_usage_tracker import TokenUsageTracker
 from backend.tool_calling import (
     _append_tool_result_to_trace,
@@ -180,26 +181,27 @@ def get_model() -> ChatOpenAI:
 
 def _build_tool_loop_system_prompt(tools: list[Any]) -> str:
     return (
-        "你是迷你烹饪问答机器人，一个亲切、靠谱、说话自然的中文厨房助手。你的主要任务是帮助用户查找、阅读和总结烹饪、菜谱、菜单与项目文件相关信息。\n"
+        "你是一个菜谱知识图谱查询助手。请使用以下工具来回答用户的问题。\n\n"
         f"{_build_tool_inventory_prompt(tools)}\n\n"
         "工具调用协议：\n"
         "- 运行时已经把上面的工具作为结构化 tools schema 传给模型；需要工具时必须发起正式 tool_call，不要在文字里假装调用。\n"
-        "- 这是意图判断与工具调用阶段，可以先认真判断用户真实意图；不要把内部推理写进最终给用户的回答。\n"
-        "- 回答用户时保持亲切、自然、简洁；遇到未命中、缺少信息或需要追问时，不要用系统错误口吻，先说明你理解用户想做什么，再说明当前限制，并给出下一步选择。\n"
-        "- 如果用户明确点名某个工具，就调用该工具。\n"
-        "- 工具名必须使用精确注册名：recipe_query_tool 或 web_search_tool；不要输出 recipe_query、recipe、search 等不存在的别名。\n"
-        "- 如果用户的输入像是在询问某道菜、某个菜式、想吃某道菜，或询问菜谱、菜品做法、怎么做、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系，或问“哪些菜用了某食材/技法”，必须先调用 recipe_query_tool；不要直接凭常识回答，也不要先调用 web_search_tool。\n"
-        "- 如果用户只是打招呼、问天气、问模型身份，或其他明显非菜谱问题，不要调用 recipe_query_tool。\n"
-        "- 例如“辣椒炒肉怎么做”“我想吃清蒸鲈鱼”“西红柿炒鸡蛋的配料”“小炒黄牛肉火候怎么控制”都必须调用 recipe_query_tool。\n"
-        "- recipe_query_tool 返回的是本地菜谱知识图谱结果；最终回答必须优先依据该工具结果。如果工具未找到，再说明本地图谱未命中，不要编造做法。\n"
-        "- 当 recipe_query_tool 返回 web_fallback_allowed: True 且本地图谱未命中时，系统可能自动补充 web_search_tool；最终回答要区分“本地图谱结果”和“联网补充资料”。\n"
-        "- 只有当用户明确要求网页搜索、网络搜索、联网查询、在线查找、最新信息，或本地菜谱知识图谱未命中且需要公共网页补充时，才调用 web_search_tool。\n"
-        "- find_tool 和 read_file_tool 当前未注册，不能调用；如果用户要求查找或读取本地文件，请说明当前暂未启用本地文件工具。\n"
+        "- 工具名必须使用精确注册名：recipe_query_tool 或 web_search_tool；不要输出不存在的别名。\n"
+        "- 如果用户的输入是在询问某道菜、菜谱、做法、怎么做、备菜过程、烹饪过程、火力调节、食材、调料、技法、口味、菜系等，必须先调用 recipe_query_tool。\n"
+        "- 如果用户只是打招呼、问天气、问模型身份等非菜谱问题，不要调用任何工具。\n"
+        "- recipe_query_tool 返回本地菜谱知识图谱结果；最终回答必须优先依据该工具结果。如果工具未找到，再说明本地图谱未命中。\n"
+        "- 当 recipe_query_tool 返回 web_fallback_allowed: True 且本地图谱未命中时，系统可能自动补充 web_search_tool。\n"
+        "- 只有当用户明确要求网页搜索、联网查询、最新信息，或本地菜谱知识图谱未命中且需要公共网页补充时，才调用 web_search_tool。\n"
         "- 工具返回结果后，必须以最新工具结果作为最高优先级证据；如果它与历史回答或你的先验冲突，明确纠正旧说法，再给最终答案。\n"
-        f"- 当前模型按 {MAX_MODEL_LEN} tokens 上下文预算运行，最终回答输出上限为 {LLM_MAX_TOKENS} tokens；不要为了微小增益反复调用工具。\n"
         f"- 本轮最多执行 {MAX_TOTAL_TOOL_CALLS} 次工具调用、最多 {MAX_TOOL_TURNS} 个模型工具回合；达到上限时必须基于已有信息总结。\n"
-        f"- 同一个工具最多只能连续调用 {MAX_CONSECUTIVE_TOOL_CALLS} 次；如果连续达到上限，也要基于已经掌握的信息给出阶段性回答，不要无限重试。\n"
-        "- 只要可用工具能够满足用户请求，就不要声称自己无法使用工具。"
+        "- 回答用户时保持亲切、自然、简洁；遇到未命中或需要追问时，先说明你理解用户想做什么，再说明当前限制。\n\n"
+        "使用格式（ReAct 风格）：\n"
+        "Thought: 思考当前用户问题需要哪个工具，以及参数是否完整\n"
+        "Action: 工具名\n"
+        "Action Input: 工具参数字典\n"
+        "Observation: 工具返回结果\n"
+        "...（可重复多轮 Thought/Action/Observation）...\n"
+        "Final Answer: 基于工具结果给用户的最终回答\n\n"
+        "Notice! 如果 Action Input 中缺少必要参数（如菜名），你必须在 Final Answer 中向用户追问清楚，停止进行任何其他操作。"
     )
 
 
@@ -1152,22 +1154,46 @@ def _web_search_choice_prompt_from_tool_context(tool_context: list[dict]) -> dic
 
 def _build_grounded_web_fallback_answer(user_text: str, tool_context: list[dict]) -> str:
     recipe_miss = False
+    recipe_query = ""
     web_content = ""
     for item in tool_context:
         tool_name = item.get("tool_name")
         content = str(item.get("content") or "")
+        args = item.get("args") if isinstance(item.get("args"), dict) else {}
         if (
             tool_name == "recipe_query_tool"
             and "success: False" in content
             and ("web_fallback_allowed: True" in content or "web_search_offer: True" in content)
         ):
             recipe_miss = True
+            recipe_query = str(args.get("query") or recipe_query).strip()
         if tool_name == "web_search_tool":
             web_content = content
 
     if not recipe_miss or not web_content:
         return ""
-    return compose_web_recipe_answer(user_text, web_content)
+    display_query = _first_nonempty_query(
+        user_text,
+        recipe_query,
+        _extract_web_search_query_from_content(web_content),
+    )
+    return compose_web_recipe_answer(display_query, web_content)
+
+
+def _first_nonempty_query(*values: str) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text and text.lower() not in {"null", "none", "undefined"}:
+            return text
+    return "这个问题"
+
+
+def _extract_web_search_query_from_content(content: str) -> str:
+    for raw_line in str(content or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("搜索结果："):
+            return line.split("：", 1)[1].strip()
+    return ""
 
 
 def _extract_recipe_dish_name(content: str) -> str:
@@ -1331,7 +1357,7 @@ def _build_tool_loop_messages(user_text: str, history: list[dict]) -> list[Any]:
             messages.append(("user", f"<历史工具上下文>\n{content}\n</历史工具上下文>"))
         elif role == "runtime_memory":
             messages.append(("user", str(content or "")))
-    messages.append(("user", _with_intent_thinking_mode(user_text)))
+    messages.append(("user", _with_intent_thinking_mode(f"Question: {user_text}")))
     return messages
 
 
@@ -1545,10 +1571,58 @@ async def stream_search_agent(user_text: str, history: list[dict]):
 
     try:
         async with asyncio.timeout(AGENT_TIMEOUT_SECONDS):
-            # preflight 已禁用（Claude Code 风格：路由决策交给工具描述 + 模型）
-            # preflight 原逻辑：_preflight_recipe_action() 拦截上下文追问/确认联网/歧义
-            # 移除原因：新菜名（如"小炒鸡具体做法"）被 preflight 误判为旧菜名属性追问
-            # 替代方案：在工具描述中写清楚路由规则，让模型自行决定
+            router_action = route_query(user_text, history)
+            trace["query_router"] = router_action.to_trace()
+            if router_action.action == "content":
+                content = str(router_action.content or "我需要先确认一下你的意思。")
+                pending_clarification = router_action.pending_clarification
+                if isinstance(pending_clarification, dict):
+                    trace["pending_clarification"] = pending_clarification
+                choice_prompt = router_action.choice_prompt
+                if isinstance(choice_prompt, dict):
+                    trace["choice_prompt"] = choice_prompt
+                token_tracker.add_generated_text(content)
+                trace["token_usage"] = token_tracker.snapshot(final=True)
+                yield {"type": "trace", "rag_trace": trace}
+                yield _token_usage_event(token_tracker, final=True)
+                yield {"type": "content", "content": content}
+                return
+            if router_action.action == "direct_chat":
+                content = str(router_action.content or "")
+                token_tracker.add_generated_text(content)
+                trace["token_usage"] = token_tracker.snapshot(final=True)
+                yield {"type": "trace", "rag_trace": trace}
+                yield _token_usage_event(token_tracker, final=True)
+                if content:
+                    yield {"type": "content", "content": content}
+                return
+            if router_action.action == "tool":
+                query = str(router_action.query or user_text)
+                tool_name = str(router_action.tool_name or "recipe_query_tool")
+                answer_user_text = str(router_action.answer_user_text or query or user_text)
+                yield {
+                    "type": "rag_step",
+                    "step": {
+                        "label": f"前置意图路由：{tool_name}",
+                        "icon": "🧭",
+                        "detail": f"{router_action.reason}: {query}",
+                    },
+                }
+                total_tool_calls += await _execute_forced_tool_call(
+                    user_text,
+                    messages,
+                    trace,
+                    tool_context,
+                    tool_name,
+                    {"query": query},
+                    "query_router_route",
+                    history,
+                )
+                async for event in _emit_final_answer_from_tool_context(answer_user_text, trace, tool_context, runtime_memory, token_tracker):
+                    if event.get("type") == "token_usage":
+                        trace["token_usage"] = event.get("token_usage")
+                    yield event
+                return
 
             for turn_index in range(MAX_TOOL_TURNS):
                 yield {

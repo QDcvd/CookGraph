@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Query Understanding 层 — 先产出结构化意图，再决定查询路径。
+"""Query Understanding 层 — LLM 驱动的意图分类器。
 
-重构目标不是继续增加临时正则，而是建立一个清晰的 Query Understanding 层，
-先产出结构化意图，再决定是否进入本地图谱查询、追问或旧正向 parser。
+不再依赖硬编码关键词/正则补丁，通过本地 LLM 路由（与 query_plan 相同的
+_call_llm_router 模式）对用户查询做结构化意图分类。
 
-doc/query_understanding_refactor_plan.md
+在 classify_intent 中注入当前会话的菜谱上下文，使 LLM 能识别指代追问
+（如"火力怎么调节"→ 辣椒炒肉的火力），输出 recipe_followup_query 意图。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+
+from backend.llm_endpoint import ensure_llm_endpoint
 
 # ── 数据类型 ──
 
@@ -24,29 +30,34 @@ class QueryIntent:
     """结构化意图。"""
 
     intent: Literal[
-        "forward_recipe_query",
-        "forward_unknown_recipe_query",
-        "reverse_query",
-        "non_recipe_query",
-        "ambiguous_query",
-        "legacy_forward_parser",
+        "forward_recipe_query",        # 已知菜名的正向查询
+        "forward_unknown_recipe_query",  # 未知菜名的正向查询
+        "reverse_query",               # 反向查询（"哪些菜用了牛肉"）
+        "recipe_followup_query",       # 指代追问（"火力怎么调节""他是怎么做的"）
+        "non_recipe_query",            # 非菜谱问题
+        "ambiguous_query",             # 歧义（需用户确认）
+        "greeting",                    # 打招呼/身份询问
     ]
-    target_type: str | None = None
-    target_text: str | None = None
-    normalized_text: str | None = None
-    relation: str | None = None
-    dish_name: str | None = None
-    attribute: str | None = None
-    confidence: float = 0.0
-    reason: str = ""
-    candidates: list[dict] | None = None
+    target_type: str | None = None          # 意图针对的实体类型
+    target_text: str | None = None          # 意图针对的实体/菜名
+    relation: str | None = None             # 图谱关系类型
+    dish_name: str | None = None            # 正向查询的菜名
+    attribute: str | None = None            # 正向查询的属性
+    confidence: float = 0.0                 # 置信度
+    reason: str = ""                        # LLM 给出的理由
+    candidates: list[dict] | None = None    # 歧义选项
+
+    # 指代追问专用：解析后的完整查询（LLM 补全后的自包含版本）
+    resolved_query: str | None = None
 
 
-# ── 配置路径 ──
+# ── 环境配置 ──
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ALIAS_PATH = ROOT / "config" / "recipe_aliases.json"
-DEFAULT_ENTITY_ALIAS_PATH = ROOT / "config" / "reverse_entity_aliases.json"
+
+_QUERY_ROUTER_TIMEOUT = float(os.getenv("QUERY_ROUTER_TIMEOUT", "12"))
+
 
 # ── 工具函数 ──
 
@@ -55,234 +66,14 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", "", text.lower())
 
 
-# ── 已知的非菜谱问题 ──
-
-EXACT_NON_RECIPE = frozenset({
-    "你好", "您好", "嗨", "hi", "hello",
-    "你是谁", "你是什么模型", "你能做什么",
-})
-
-NON_RECIPE_KEYWOR = frozenset({
-    "天气", "几点", "日期", "股票", "新闻", "电影", "音乐", "模型",
-})
-
-RECIPE_KEYWOR = frozenset({
-    "菜", "菜谱", "做法", "怎么做", "烹饪", "配料", "食材", "调料",
-    "火候", "火力", "备菜", "下锅", "炒", "蒸", "煮", "炸", "煎",
-    "炖", "拌", "烤",
-})
-
-# ── 反向查询模式（结构化） ──
-
-REVERSE_PATTERNS: list[dict[str, Any]] = [
-    # ── 明确做法/技法反向，必须早于“用了某食材” ──
-    dict(pattern=r"(?:哪些菜|有哪些菜|有什么菜)(?:用了|使用|采用)(?P<v>[一-鿿]{1,12}?)(?:这种)?(?:做法|技法|烹饪方式|方法)", kind="technique"),
-    # ── 食材反向（最高优先级，避免被 technique 误截） ──
-    dict(pattern=r"(?:哪些菜|有哪些菜|有什么菜)(?:用了|使用|包含|有)(?P<v>[一-鿿]{1,12})(?:这种)?(?:食材|材料)?", kind="ingredient"),
-    dict(pattern=r"^(?P<v>[一-鿿]{1,12}?)(?:可以|能|可|能够)(?:用来)?做(?:什么|哪些|啥).{0,4}菜?", kind="ingredient"),
-    dict(pattern=r"^(?P<v>[一-鿿]{1,12}?)用来做(?:什么|哪些|啥).{0,4}菜?", kind="ingredient"),
-    dict(pattern=r"^(?P<v>[一-鿿]{1,12}?)有多少(?:种)?(?:做法|吃法|菜式)", kind="ingredient"),
-    # ── 菜系反向 ──
-    dict(pattern=r"^(?:有哪些|有什么|哪些)(?P<v>[一-鿿]{1,8})菜(?:推荐)?$", kind="cuisine"),
-    dict(pattern=r"什么(?P<v>[一-鿿]{1,6})菜(?:推荐)?$", kind="generic"),
-    # ── 口味反向 ──
-    dict(pattern=r"(?:哪些菜|有哪些菜|有什么菜)?(?:是|属于)?(?P<v>[一-鿿]{1,8}味)(?:的)?", kind="taste"),
-    dict(pattern=r"(?:哪些菜|有哪些菜|有什么菜)?(?:是|属于)?(?P<v>[一-鿿]{1,8}味)", kind="taste"),
-    # ── 技法反向（放在食材/口味之后，避免误截） ──
-    dict(pattern=r"(?:哪些菜|有哪些菜|有什么菜)(?:是|属于)?(?P<v>[一-鿿]{1,12}?)(?:做法|技法|烹饪方式|方法)", kind="technique"),
-    dict(pattern=r"(?:哪些菜|有哪些菜|有什么菜)(?:是|属于)?(?P<v>[一-鿿]{1,12}?)(?:的)", kind="technique"),
-    # ── 通用反向 ──
-    dict(pattern=r"有(?:什么|哪些).{0,8}菜", kind="generic"),
-    dict(pattern=r"什么(?P<v>[一-鿿]{1,6})菜(?:推荐)?$", kind="generic"),
-]
-
-# ── 反向查询图谱规格 ──
-
-REVERSE_RELATION_SPECS: dict[str, dict[str, str]] = {
-    "ingredient": {"relation": "USES_MAIN_INGREDIENT", "label": "Ingredient", "display": "食材"},
-    "auxiliary":   {"relation": "USES_AUXILIARY",      "label": "Ingredient", "display": "辅料"},
-    "seasoning":   {"relation": "USES_SEASONING",       "label": "Seasoning", "display": "调味品"},
-    "technique":   {"relation": "USES_TECHNIQUE",       "label": "Technique", "display": "技法"},
-    "taste":       {"relation": "HAS_TASTE",            "label": "Taste",     "display": "口味"},
-    "cuisine":     {"relation": "BELONGS_TO_CUISINE",   "label": "Cuisine",   "display": "菜系"},
-}
-
-# ── 实体级别反向词（短词命中） ──
-
-ENTITY_LEVEL_REVERSE: dict[str, list[str]] = {
-    "ingredient": [
-        "牛肉", "猪肉", "鸡肉", "鱼肉", "虾", "花甲", "肥牛", "鸡蛋",
-        "莲藕", "包菜", "土豆", "茄子", "豆腐", "青菜",
-    ],
-    "cuisine": ["川菜", "湘菜", "粤菜", "鲁菜", "苏菜", "闽菜", "浙菜", "徽菜"],
-    "taste": ["香辣味", "麻辣味", "酸甜味", "酸辣味", "清淡", "咸鲜"],
-    "technique": ["蒸制", "爆炒", "炝炒", "红烧", "清蒸", "白灼"],
-}
-
-# ── 多类型歧义词 ──
-
-AMBIGUOUS_TERMS: dict[str, list[dict[str, str]]] = {
-    "蒜蓉": [
-        {"target_type": "ingredient", "target_text": "蒜蓉"},
-        {"target_type": "technique", "target_text": "蒜蓉炒"},
-    ],
-}
-
-# ═══════════════════════════════════════════════
-# 意图分类
-# ═══════════════════════════════════════════════
+def _safe_float(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
-def classify_intent(
-    text: str,
-    *,
-    dish_names: set[str] | None = None,
-    kg_system: Any = None,
-) -> QueryIntent:
-    """优先级规则（见 doc/query_understanding_refactor_plan.md）：
-
-    1. 明确非菜谱问题 -> non_recipe_query
-    2. 直接命中标准菜名 -> forward_recipe_query
-    3. 直接命中标准菜名别名 -> forward_recipe_query
-    4. 明确反向模式 -> reverse_query
-    5. 短词命中食材/技法/口味/菜系 -> reverse_query
-    6. 多类型命中且无法判断 -> ambiguous_query
-    7. 其余 -> legacy_forward_parser
-    """
-    raw = text.strip()
-    normalized = _normalize_text(raw)
-    if not normalized:
-        return QueryIntent(intent="non_recipe_query", reason="空输入")
-
-    # 1. 明确非菜谱问题
-    if text in EXACT_NON_RECIPE:
-        return QueryIntent(intent="non_recipe_query", reason="精确命中非菜谱词表")
-    if any(kw in normalized for kw in NON_RECIPE_KEYWOR) and not any(
-        kw in normalized for kw in RECIPE_KEYWOR
-    ):
-        return QueryIntent(intent="non_recipe_query", reason=f"非菜谱关键词命中: {_matched_keywords(normalized, NON_RECIPE_KEYWOR)}")
-
-    # 2. 直接命中标准菜名
-    if dish_names:
-        matched = _match_dish_name(raw, dish_names)
-        if matched:
-            return QueryIntent(
-                intent="forward_recipe_query",
-                dish_name=matched,
-                confidence=0.95,
-                reason=f"直接命中标准菜名: {matched}",
-            )
-
-    # 3. 别名命中 → forward_recipe_query
-    if dish_names:
-        matched = _match_alias(raw, dish_names)
-        if matched:
-            return QueryIntent(
-                intent="forward_recipe_query",
-                dish_name=matched,
-                confidence=0.9,
-                reason=f"别名命中: {matched}",
-            )
-
-    # 4. “想做某道菜，问材料/调味/配菜”是单菜谱属性请求。
-    # 这类问题可能包含“哪些调味料”，但不是“哪些菜用了某食材”的反向查询。
-    forward_attr = _classify_forward_attribute_request(normalized)
-    if forward_attr:
-        return forward_attr
-
-    # 5. 明确反向模式
-    reverse_result = _classify_reverse_pattern(normalized, raw, kg_system=kg_system)
-    if reverse_result:
-        return reverse_result
-
-    # 6. “实体 + 怎么做”只有在实体能精确归并到图谱节点时才算反向。
-    entity_how_to = _classify_entity_how_to(normalized, kg_system=kg_system)
-    if entity_how_to:
-        return entity_how_to
-
-    # 7. 歧义词
-    if normalized in AMBIGUOUS_TERMS:
-        candidates = AMBIGUOUS_TERMS[normalized]
-        return QueryIntent(
-            intent="ambiguous_query",
-            candidates=candidates,
-            confidence=0.5,
-            reason=f"多类型歧义词: {normalized}",
-        )
-
-    # 8. 短词命中实体。必须是整句短词，不允许从未知菜名中截子串。
-    short_result = _classify_short_term(normalized, kg_system=kg_system)
-    if short_result:
-        return short_result
-
-    # 9. 正向未知单菜谱。比如“红烧排骨怎么做”“麻婆豆腐”。
-    if _looks_like_unknown_single_recipe(normalized):
-        return QueryIntent(
-            intent="forward_unknown_recipe_query",
-            confidence=0.65,
-            reason="像单道菜谱查询，但未命中本地图谱菜名/别名",
-        )
-
-    # 10. 其余 → 旧 parser
-    return QueryIntent(
-        intent="legacy_forward_parser",
-        confidence=0.3,
-        reason="未匹配任何特定模式，交旧 parser",
-    )
-
-
-def _matched_keywords(text: str, keywords: frozenset) -> str:
-    for kw in sorted(keywords, key=len, reverse=True):
-        if kw in text:
-            return kw
-    return ""
-
-
-def _match_dish_name(text: str, dish_names: set[str]) -> str | None:
-    for name in sorted(dish_names, key=len, reverse=True):
-        if name in text:
-            return name
-    return None
-
-
-def _dish_alias_variants(canonical: str, alias_map: dict[str, list[str]]) -> set[str]:
-    variants = {canonical}
-    for _ in range(3):
-        before_count = len(variants)
-        for value in list(variants):
-            for source, targets in alias_map.items():
-                if source in value:
-                    for target in targets:
-                        variants.add(value.replace(source, target))
-        if len(variants) == before_count:
-            break
-    return variants
-
-
-def _match_alias(text: str, dish_names: set[str]) -> str | None:
-    """通过别名反向匹配菜名。
-
-    流程：
-    1. 找到文本中所有存在的别名词
-    2. 逐一替换为标准名
-    3. 执行多轮替换（高优先级的替换可能暴露新的可替换词）
-    4. 最终检查替换后文本是否包含标准菜名
-
-    例：
-    - "西红柿炒鸡蛋怎么做"
-      → "番茄炒鸡蛋怎么做"（西红柿→番茄）
-      → "番茄炒蛋怎么做"（鸡蛋→蛋）
-      → 包含"番茄炒蛋" ✅
-    - "牛肉怎么做" → 替换后仍不包含菜名 ❌
-    """
-    normalized = _normalize_text(text)
-    alias_map = _load_alias_map()
-    for dish in sorted(dish_names, key=len, reverse=True):
-        for variant in sorted(_dish_alias_variants(dish, alias_map), key=len, reverse=True):
-            if len(_normalize_text(variant)) >= 2 and _normalize_text(variant) in normalized:
-                return dish
-    return None
-
+# ── 别名加载（保持，供下游验证用）──
 
 _alias_map_cache: dict[str, list[str]] | None = None
 
@@ -312,84 +103,35 @@ def _load_alias_map() -> dict[str, list[str]]:
     return alias_map
 
 
-def _match_alias_old(text: str, dish_names: set[str]) -> str | None:
-    alias_groups = _load_alias_groups()
-    normalized = _normalize_text(text)
-    for group in alias_groups:
-        for dish in sorted(dish_names, key=len, reverse=True):
-            if dish not in group:
-                continue
-            for alias in group:
-                if _normalize_text(alias) in normalized:
-                    return dish
+def _match_dish_name(text: str, dish_names: set[str]) -> str | None:
+    for name in sorted(dish_names, key=len, reverse=True):
+        if name in text:
+            return name
     return None
 
 
-def _match_alias_with_rewrite(text: str, dish_names: set[str]) -> str | None:
+def _match_alias(text: str, dish_names: set[str]) -> str | None:
+    normalized = _normalize_text(text)
     alias_map = _load_alias_map()
-    variants = {text}
-    for _ in range(4):
+    for dish in sorted(dish_names, key=len, reverse=True):
+        for variant in sorted(_dish_alias_variants(dish, alias_map), key=len, reverse=True):
+            if len(_normalize_text(variant)) >= 2 and _normalize_text(variant) in normalized:
+                return dish
+    return None
+
+
+def _dish_alias_variants(canonical: str, alias_map: dict[str, list[str]]) -> set[str]:
+    variants = {canonical}
+    for _ in range(3):
         before_count = len(variants)
         for value in list(variants):
             for source, targets in alias_map.items():
-                if source not in value:
-                    continue
-                for target in targets:
-                    variants.add(value.replace(source, target))
+                if source in value:
+                    for target in targets:
+                        variants.add(value.replace(source, target))
         if len(variants) == before_count:
             break
-    normalized_variants = {_normalize_text(item) for item in variants}
-    for dish in sorted(dish_names, key=len, reverse=True):
-        dish_norm = _normalize_text(dish)
-        if any(dish_norm in item for item in normalized_variants):
-            return dish
-    return None
-
-
-def _has_reverse_markers(text: str) -> bool:
-    """检查文本是否包含反向查询标记。"""
-    markers = ["哪些菜", "有哪些菜", "有什么菜", "哪道菜"]
-    return any(m in text for m in markers)
-
-
-def _has_cooking_markers(text: str) -> bool:
-    """检查文本是否包含烹饪/做法关键词。"""
-    markers = ["怎么做", "做法", "如何做", "烹饪", "怎么做好吃"]
-    return any(m in text for m in markers)
-
-
-def _classify_forward_attribute_request(text: str) -> QueryIntent | None:
-    """识别“想做某道菜，问调味料/配菜/材料”的未知单菜谱属性请求。"""
-    if not re.search(r"(?:我想做|想做|要做|准备做|学做)", text):
-        return None
-    attribute_markers = [
-        "需要准备",
-        "准备哪些",
-        "调味料",
-        "调料",
-        "配菜",
-        "食材",
-        "材料",
-        "用料",
-    ]
-    if not any(marker in text for marker in attribute_markers):
-        return None
-    return QueryIntent(
-        intent="forward_unknown_recipe_query",
-        confidence=0.72,
-        reason="单菜谱属性请求，但未命中本地图谱菜名/别名",
-    )
-
-
-def _looks_like_unknown_single_recipe(text: str) -> bool:
-    """识别应按“未知单菜谱”处理的问题，而不是反向实体查询。"""
-    if _has_reverse_markers(text):
-        return False
-    if _has_cooking_markers(text):
-        return True
-    if any(marker in text for marker in ["是什么菜", "介绍一下", "讲讲"]):
-        return True
-    return bool(re.fullmatch(r"[一-鿿]{2,10}", text))
+    return variants
 
 
 def _graph_node_names(kg_system: Any, label: str) -> set[str]:
@@ -402,148 +144,322 @@ def _graph_node_names(kg_system: Any, label: str) -> set[str]:
     return set()
 
 
-def _load_reverse_entity_aliases() -> dict[str, dict[str, list[str]]]:
+# ═══════════════════════════════════════════════
+# LLM 路由 — 意图分类
+# ═══════════════════════════════════════════════
+
+
+def _call_llm_router(
+    raw: str,
+    *,
+    dish_names_str: str,
+    entity_names_str: str,
+    recipe_context_str: str,
+) -> dict | None:
+    """调用本地 LLM 做意图分类。
+
+    复用 query_plan 相同的 HTTP 调用模式，但用不同的 prompt。
+    """
+    base_url = ensure_llm_endpoint(os.getenv("LLM_BASE_URL", "http://127.0.0.1:51234/v1")).rstrip("/")
+    api_key = os.getenv("LLM_API_KEY", "not-needed")
+    model = os.getenv("INTENT_ROUTER_MODEL", os.getenv("LLM_MODEL", "qwen3-4b"))
+    no_think = os.getenv("INTENT_ROUTER_NO_THINK", os.getenv("LLM_NO_THINK", "0"))
+    timeout = _QUERY_ROUTER_TIMEOUT
+
+    prompt = _build_classifier_prompt(raw, dish_names_str, entity_names_str, recipe_context_str)
+    url = f"{base_url}/chat/completions"
+
+    system_msg = (
+        "你是菜谱知识图谱查询意图分类器。"
+        "只输出 JSON，不要解释，不要用 markdown 包裹。"
+        "不能编造图谱实体，只能从用户给出的列表中选择。"
+    )
+
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+            "max_tokens": 512,
+            "extra_body": {"no_think": True} if no_think == "1" else {},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
     try:
-        data = json.loads(DEFAULT_ENTITY_ALIAS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    result: dict[str, dict[str, list[str]]] = {}
-    for kind, mapping in data.items():
-        if not isinstance(mapping, dict):
-            continue
-        clean: dict[str, list[str]] = {}
-        for canonical, aliases in mapping.items():
-            values = [str(canonical)]
-            if isinstance(aliases, list):
-                values.extend(str(item) for item in aliases if item)
-            clean[str(canonical)] = list(dict.fromkeys(values))
-        result[str(kind)] = clean
-    return result
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        retry_base_url = ensure_llm_endpoint(base_url, force_retry=True).rstrip("/")
+        if retry_base_url != base_url:
+            url = f"{retry_base_url}/chat/completions"
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as retry_exc:
+                print(f"[query_understanding] LLM router unavailable: {retry_exc}", file=__import__("sys").stderr)
+                return None
+        else:
+            print(f"[query_understanding] LLM router unavailable: {exc}", file=__import__("sys").stderr)
+            return None
+
+    content = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    )
+    return _parse_router_json(str(content))
 
 
-def _resolve_entity_exact(kind: str, text: str, kg_system: Any = None) -> str | None:
-    spec = REVERSE_RELATION_SPECS.get(kind)
-    if not spec:
+def _build_classifier_prompt(
+    raw: str,
+    dish_names_str: str,
+    entity_names_str: str,
+    recipe_context_str: str,
+) -> str:
+    """构建意图分类 prompt。"""
+    context_block = ""
+    if recipe_context_str:
+        context_block = (
+            "\n当前会话菜谱上下文（用户前几轮讨论的内容）：\n"
+            f"{recipe_context_str}\n"
+        )
+
+    return f"""用户问题：{raw}{context_block}
+
+可用菜名（本地图谱中的标准菜名）：
+{dish_names_str or "（无）"}
+
+可用实体（食材、口味、菜系、技法）：
+{entity_names_str or "（无）"}
+
+请将用户问题分类为以下 intent 之一：
+
+1. **forward_recipe_query** — 用户明确说出菜名并问做法/配料/火力等属性。
+   例："小炒黄牛肉的做法""红烧肉需要什么材料""清蒸鲈鱼怎么做"
+   → dish_name 填菜名
+
+2. **forward_unknown_recipe_query** — 用户在问一道菜的做法，但菜名不在本地图谱中，
+   或用户没说到具体菜名。
+   例："老豆腐的做法""介绍一道家常菜"
+
+3. **reverse_query** — 用户在问"哪些菜用了某食材/口味/菜系/技法"。
+   例："哪些菜用了牛肉""有什么川菜推荐""香辣味的菜"
+   → target_type 填实体类型，target_text 填实体值
+
+4. **recipe_followup_query** — 用户没提菜名，但用"它""他""这个""火力""做法"等
+   指代/省略方式追问当前菜谱上下文中的某道菜。
+   **必须检查 recipe_context 中是否有当前讨论的菜品，如果有，在 resolved_query 中
+   补全菜名后再传给工具。**
+   例：上轮说了"香煎豆腐"，用户说"他是怎么做的呢"
+   → resolved_query: "香煎豆腐怎么做"
+   例：上轮说了"辣椒炒肉"，用户说"火力怎么调节"
+   → resolved_query: "辣椒炒肉的火力怎么调节"
+   例：上轮说了"辣椒炒肉"，用户说"具体怎么调火力？"
+   → resolved_query: "辣椒炒肉的具体火力调节"
+   → 如果 recipe_context 为空或明显不是指代追问，请选 non_recipe_query
+
+5. **non_recipe_query** — 与菜谱完全无关的闲聊。
+   例："今天天气怎么样""讲个笑话""1+1等于几""帮我写个邮件"
+
+6. **ambiguous_query** — 用户说的词有多种菜谱含义，无法确定。
+   例："蒜蓉"（辅料还是蒜蓉炒技法？）
+
+7. **greeting** — 打招呼、问身份。
+   例："你好""你是谁""你能做什么"
+
+输出 JSON schema：
+{{
+  "intent": "forward_recipe_query|forward_unknown_recipe_query|reverse_query|recipe_followup_query|non_recipe_query|ambiguous_query|greeting",
+  "dish_name": "菜名或null",
+  "target_type": "ingredient|taste|cuisine|technique|null",
+  "target_text": "实体值或null",
+  "relation": "USES_MAIN_INGREDIENT|HAS_TASTE|BELONGS_TO_CUISINE|USES_TECHNIQUE|null",
+  "resolved_query": "仅 recipe_followup_query 时使用，补全了菜名的完整查询；其他情况填null",
+  "confidence": 0.0-1.0,
+  "reason": "简短中文理由"
+}}"""
+
+
+def _parse_router_json(content: str) -> dict | None:
+    text = str(content or "").strip()
+    if not text:
         return None
-    normalized = _normalize_text(text)
-    node_names = _graph_node_names(kg_system, spec["label"]) if kg_system is not None else set()
-    for name in node_names:
-        if _normalize_text(name) == normalized:
-            return name
-
-    aliases_by_kind = _load_reverse_entity_aliases()
-    for canonical, values in aliases_by_kind.get(kind, {}).items():
-        if any(_normalize_text(value) == normalized for value in values):
-            return canonical
-    return None
-
-
-def _classify_entity_how_to(normalized: str, kg_system: Any = None) -> QueryIntent | None:
-    match = re.fullmatch(r"(?P<v>[一-鿿]{1,12}?)(?:怎么做|怎么做好吃)$", normalized)
-    if not match:
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    else:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if match:
+            text = match.group(0)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
         return None
-    value = match.group("v")
-    resolved = _resolve_entity_exact("ingredient", value, kg_system=kg_system)
-    if not resolved:
-        return None
-    spec = REVERSE_RELATION_SPECS["ingredient"]
+    return data if isinstance(data, dict) else None
+
+
+# ═══════════════════════════════════════════════
+# 公开 API
+# ═══════════════════════════════════════════════
+
+
+def classify_intent(
+    text: str,
+    *,
+    dish_names: set[str] | None = None,
+    kg_system: Any = None,
+    recipe_context: dict | None = None,
+) -> QueryIntent:
+    """对用户查询做意图分类。
+
+    参数：
+        text: 用户原始输入。
+        dish_names: 本地图谱的标准菜名集合（用于辅助 LLM 识别菜名）。
+        kg_system: RecipeQuerySystem 实例（用于提取实体节点名）。
+        recipe_context: 当前会话菜谱上下文（用于识别指代追问），
+                       格式如 {"current_dish": "香煎豆腐", "current_entity": "豆腐"}。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return QueryIntent(intent="non_recipe_query", reason="空输入")
+
+    # ── 构建 LLM 上下文 ──
+
+    # 菜名列
+    dish_names_str = ""
+    if dish_names:
+        sorted_dishes = sorted(dish_names, key=len, reverse=True)
+        dish_names_str = "、".join(sorted_dishes[:200])
+
+    # 实体列
+    entity_names_str = ""
+    if kg_system is not None:
+        parts = []
+        for label, display in [("Ingredient", "食材"), ("Taste", "口味"),
+                                ("Cuisine", "菜系"), ("Technique", "技法")]:
+            names = _graph_node_names(kg_system, label)
+            if names:
+                sample = "、".join(sorted(names)[:80])
+                parts.append(f"- {display}: {sample}")
+        entity_names_str = "\n".join(parts)
+
+    # 会话上下文
+    recipe_context_str = ""
+    if recipe_context:
+        parts = []
+        if recipe_context.get("current_dish"):
+            parts.append(f"当前菜品：{recipe_context['current_dish']}")
+        if recipe_context.get("current_entity"):
+            parts.append(f"当前实体：{recipe_context['current_entity']}")
+        if recipe_context.get("last_query"):
+            parts.append(f"用户上一轮说：{recipe_context['last_query']}")
+        if recipe_context.get("last_answer_head"):
+            parts.append(f"助手上一轮回答开头：{recipe_context['last_answer_head']}")
+        recipe_context_str = "；".join(parts)
+
+    # ── 调用 LLM ──
+
+    result = _call_llm_router(
+        raw,
+        dish_names_str=dish_names_str,
+        entity_names_str=entity_names_str,
+        recipe_context_str=recipe_context_str,
+    )
+
+    if result is None or not isinstance(result, dict):
+        return _fallback_classify(raw, dish_names)
+
+    intent = str(result.get("intent") or "").strip()
+    confidence = _safe_float(result.get("confidence"), 0.0)
+
+    # 低置信度走保底
+    if confidence < 0.4:
+        return _fallback_classify(raw, dish_names)
+
+    resolved_query = result.get("resolved_query") or None
+
     return QueryIntent(
-        intent="reverse_query",
-        target_type="ingredient",
-        target_text=resolved,
-        relation=spec["relation"],
-        confidence=0.82,
-        reason=f"实体做法问法命中ingredient: {resolved}",
+        intent=intent,  # type: ignore[arg-type]
+        dish_name=result.get("dish_name") or None,
+        target_type=result.get("target_type") or None,
+        target_text=result.get("target_text") or None,
+        relation=result.get("relation") or None,
+        confidence=confidence,
+        reason=str(result.get("reason") or intent),
+        resolved_query=resolved_query,
     )
 
 
-_alias_groups_cache: list[set[str]] | None = None
-
-
-def _load_alias_groups() -> list[set[str]]:
-    global _alias_groups_cache
-    if _alias_groups_cache is not None:
-        return _alias_groups_cache
-    groups: list[set[str]] = []
-    if DEFAULT_ALIAS_PATH.is_file():
-        try:
-            data = json.loads(DEFAULT_ALIAS_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        if isinstance(data, dict):
-            for canonical, aliases in data.items():
-                group = {str(canonical)} | {str(a) for a in (aliases or []) if a}
-                group = {g for g in group if g}
-                if group:
-                    groups.append(group)
-    _alias_groups_cache = groups
-    return groups
-
-
-def _classify_reverse_pattern(
-    normalized: str,
+def _fallback_classify(
     raw: str,
-    kg_system: Any = None,
-) -> QueryIntent | None:
-    """按结构化反向模式分类。"""
-    for spec in REVERSE_PATTERNS:
-        match = re.search(spec["pattern"], normalized)
-        if not match:
-            continue
-        kind = spec["kind"]
-        if kind == "generic":
-            return QueryIntent(
-                intent="reverse_query",
-                reason=f"匹配反向模式: {spec['pattern']}",
-                confidence=0.85,
-            )
-        if kind in ("ingredient", "cuisine", "taste", "technique"):
-            value = match.group("v") if "v" in match.groupdict() else raw
-            spec = REVERSE_RELATION_SPECS.get(kind)
-            return QueryIntent(
-                intent="reverse_query",
-                target_type=kind,
-                target_text=value,
-                relation=spec["relation"] if spec else None,
-                confidence=0.7,
-                reason=f"反向模式匹配: {kind}={value}",
-            )
-    return None
+    dish_names: set[str] | None,
+) -> QueryIntent:
+    """LLM 不可用时的最小保底分类。"""
+    normalized = _normalize_text(raw)
 
+    # 打招呼
+    if raw in {"你好", "您好", "嗨", "hi", "hello", "你是谁", "你是什么模型", "你能做什么"}:
+        return QueryIntent(intent="greeting", confidence=0.9, reason="fallback: greeting match")
 
-def _classify_short_term(
-    normalized: str,
-    kg_system: Any = None,
-) -> QueryIntent | None:
-    """短词命中实体级别反向查询。"""
-    for kind, terms in ENTITY_LEVEL_REVERSE.items():
-        for term in terms:
-            if _normalize_text(term) == normalized:
-                spec = REVERSE_RELATION_SPECS.get(kind)
-                if spec:
-                    return QueryIntent(
-                        intent="reverse_query",
-                        target_type=kind,
-                        target_text=term,
-                        relation=spec["relation"],
-                        confidence=0.8,
-                        reason=f"短词命中{kind}: {term}",
-                    )
-        resolved = _resolve_entity_exact(kind, normalized, kg_system=kg_system)
-        if resolved:
-            spec = REVERSE_RELATION_SPECS.get(kind)
-            if spec:
-                return QueryIntent(
-                    intent="reverse_query",
-                    target_type=kind,
-                    target_text=resolved,
-                    relation=spec["relation"],
-                    confidence=0.8,
-                    reason=f"短词命中图谱{kind}: {resolved}",
-                )
-    return None
+    # 非菜谱关键词
+    non_recipe_keywords = {"天气", "几点", "日期", "股票", "新闻", "电影", "音乐", "python", "代码"}
+    recipe_keywords = {"菜", "菜谱", "做法", "怎么做", "烹饪", "配料", "食材", "调料",
+                       "火候", "火力", "炒", "蒸", "煮", "炸", "煎", "炖", "烤"}
+    if any(kw in normalized for kw in non_recipe_keywords) and not any(kw in normalized for kw in recipe_keywords):
+        return QueryIntent(intent="non_recipe_query", confidence=0.7, reason="fallback: non-recipe keyword")
+
+    # 菜名匹配
+    if dish_names:
+        matched = _match_dish_name(raw, dish_names)
+        if matched:
+            return QueryIntent(
+                intent="forward_recipe_query",
+                dish_name=matched,
+                confidence=0.8,
+                reason=f"fallback: dish name match: {matched}",
+            )
+        matched_alias = _match_alias(raw, dish_names)
+        if matched_alias:
+            return QueryIntent(
+                intent="forward_recipe_query",
+                dish_name=matched_alias,
+                confidence=0.75,
+                reason=f"fallback: alias match: {matched_alias}",
+            )
+
+    # 反向查询标记
+    if any(m in raw for m in ["哪些菜", "有哪些菜", "有什么菜"]):
+        return QueryIntent(intent="reverse_query", confidence=0.6, reason="fallback: reverse marker")
+
+    # 做法标记 → 未知菜谱
+    if any(m in raw for m in ["怎么做", "做法", "如何做"]):
+        return QueryIntent(intent="forward_unknown_recipe_query", confidence=0.55, reason="fallback: cooking marker")
+
+    # 兜底
+    return QueryIntent(intent="forward_unknown_recipe_query", confidence=0.3, reason="fallback: default")
 
 
 def format_ambiguous_query(intent: QueryIntent) -> str:

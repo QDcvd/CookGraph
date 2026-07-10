@@ -848,7 +848,7 @@ def _query_reverse_relation_local(
 def execute_reverse_query(system: Any, intent: QueryIntent) -> str:
     kind = str(intent.target_type or "")
     spec = REVERSE_RELATION_SPECS.get(kind)
-    raw_value = str(intent.target_text or intent.normalized_text or "").strip()
+    raw_value = str(intent.target_text or "").strip()
     if not spec or not raw_value:
         return (
             "我还没判断清楚你想按哪种维度查菜，可以再具体一点吗？\n\n"
@@ -1158,12 +1158,20 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
     intent = classify_intent(text, dish_names=dish_names, kg_system=system)
     if intent.intent == "non_recipe_query":
         return format_non_recipe(text)
+    if intent.intent == "greeting":
+        # 打招呼/问身份，让 LLM 自行回答，不进菜谱查询
+        return ""
     if intent.intent == "ambiguous_query":
         return format_ambiguous_query(intent)
     if intent.intent == "reverse_query":
         return execute_reverse_query(system, intent)
+    if intent.intent == "recipe_followup_query":
+        # 指代追问：使用 LLM 补全后的 resolved_query 作为查询文本
+        if intent.resolved_query:
+            text = intent.resolved_query
+        # 补全后继续走现有查询链路
     forward_unknown = intent.intent == "forward_unknown_recipe_query"
-    if intent.intent in ("forward_recipe_query", "forward_unknown_recipe_query", "legacy_forward_parser"):
+    if intent.intent in ("forward_recipe_query", "forward_unknown_recipe_query"):
         # 继续走现有查询链路
         pass
 

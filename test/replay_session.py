@@ -60,6 +60,16 @@ def _handler(transport, rh, rp):
             finally: ch.close()
     return H
 
+def kill_port(port):
+    """杀掉占用指定端口的进程。"""
+    import subprocess
+    result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        if f":{port}" in line and "LISTENING" in line:
+            parts = line.strip().split()
+            pid = parts[-1]
+            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+
 def start_tunnel(env):
     if not env_truthy(env.get("LLM_SSH_TUNNEL")): return None
     b = env.get("LLM_BASE_URL","")
@@ -67,6 +77,8 @@ def start_tunnel(env):
     lh = env.get("LLM_LOCAL_HOST","127.0.0.1")
     lb = f"http://{lh}:{lp}/v1"
     env["LLM_BASE_URL"] = lb; os.environ["LLM_BASE_URL"] = lb
+    # 清理残留端口，避免前一次 TIME_WAIT 误判为"API 可用"
+    kill_port(lp)
     if openai_base_available(lb): return None
     rh = str(env.get("LLM_REMOTE_HOST","")).strip()
     ru = str(env.get("LLM_REMOTE_USER","")).strip()
@@ -83,13 +95,21 @@ def start_tunnel(env):
 
 # ── 复刻对话 ──
 questions = [
-    "告诉我西红柿炒鸡蛋怎么做",
-    "鸡蛋有多少种做法？",
-    "我想吃清蒸鲈鱼",
+    "猪肉可以用来做什么",
     "锅包肉怎么做",
-    "告诉我清蒸鲈鱼怎么做",
-    "严格使用菜谱工具查询",
-    "完了",
+    "火力如何",
+    "锅包肉的火力要怎么样",
+    "沙拉怎么做",
+    "牛肉可以用来做什么菜",
+    "鱼可以做什么菜",
+    "年糕可以做什么菜",
+    "牛肉可以坐什么菜",
+    "牛肉可以用来做什么菜",
+    "猪肉可以用来做什么",
+    "清蒸牛肉怎么做",
+    "那这道菜的火力要怎么样",
+    "我只要知道火力是多少",
+    "我只要知道小炒黄牛肉火力是多少",
 ]
 
 async def main():
@@ -100,33 +120,37 @@ async def main():
     print(f"  LLM: {os.environ.get('LLM_MODEL','?')}")
     print(f"{'='*60}")
 
-    for i, q in enumerate(questions):
-        print(f"\n{'─'*40}")
-        print(f"[第{i+1}轮] 用户: {q}")
-        print(f"{'─'*40}")
+    try:
+        for i, q in enumerate(questions):
+            print(f"\n{'─'*40}")
+            print(f"[第{i+1}轮] 用户: {q}")
+            print(f"{'─'*40}")
 
-        full = ""
-        trace = None
-        try:
-            async for ev in stream_search_agent(q, history):
-                if ev.get("type") == "content":
-                    full += ev.get("content","")
-                elif ev.get("type") == "trace":
-                    trace = ev.get("rag_trace")
-        except Exception as e:
-            print(f"[错误] {e}")
-            continue
+            full = ""
+            trace = None
+            try:
+                async for ev in stream_search_agent(q, history):
+                    if ev.get("type") == "content":
+                        full += ev.get("content","")
+                    elif ev.get("type") == "trace":
+                        trace = ev.get("rag_trace")
+            except Exception as e:
+                print(f"[错误] {e}")
+                continue
 
-        print(f"[回答]: {full[:500]}")
-        if trace:
-            calls = trace.get("tool_calls",[])
-            if calls:
-                for tc in calls:
-                    print(f"  → tool: {tc.get('tool_name','')}({tc.get('args',{})})")
-        print(f"  [{len(full)} chars]")
+            print(f"[回答]: {full[:500]}")
+            if trace:
+                calls = trace.get("tool_calls",[])
+                if calls:
+                    for tc in calls:
+                        print(f"  → tool: {tc.get('tool_name','')}({tc.get('args',{})})")
+            print(f"  [{len(full)} chars]")
 
-        history.append({"role":"user","content":q})
-        history.append({"role":"assistant","content":full,"rag_trace":trace})
+            history.append({"role":"user","content":q})
+            history.append({"role":"assistant","content":full,"rag_trace":trace})
+    finally:
+        if tunnel:
+            tunnel[0].shutdown(); tunnel[0].server_close(); tunnel[1].close()
 
     if tunnel:
         tunnel[0].shutdown(); tunnel[0].server_close(); tunnel[1].close()

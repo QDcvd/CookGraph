@@ -307,6 +307,35 @@ class AgentPreflightGuardrailTests(unittest.TestCase):
         self.assertIn(tool_calls[-1].get("args", {}).get("query"), {"凉拌牛肉怎么做", "凉拌牛肉的做法"})
         self.assertIsNone(trace.get("choice_prompt"))
 
+    def test_web_fallback_answer_does_not_surface_null_query(self):
+        answer = _build_grounded_web_fallback_answer(
+            "null",
+            [
+                {
+                    "tool_name": "recipe_query_tool",
+                    "args": {"query": "锅包肉的火力要怎么样"},
+                    "content": (
+                        "结构化摘要：\n"
+                        "success: False\n"
+                        "web_fallback_allowed: True"
+                    ),
+                },
+                {
+                    "tool_name": "web_search_tool",
+                    "args": {"query": "锅包肉的火力要怎么样"},
+                    "content": (
+                        "搜索结果：锅包肉的火力要怎么样\n"
+                        "1. 锅包肉火候\n"
+                        "链接：https://example.test/recipe\n"
+                        "摘要：锅包肉做法步骤 1. 切里脊 2. 挂糊 3. 复炸 4. 调汁 5. 快速翻炒。"
+                    ),
+                },
+            ],
+        )
+
+        self.assertIn("锅包肉的火力要怎么样", answer)
+        self.assertNotIn("“null”", answer)
+
     def test_contextual_attribute_followup_runs_before_clarification_gate(self):
         history = [
             {"role": "user", "content": "辣椒炒肉怎么做"},

@@ -13,6 +13,9 @@ from typing import Any
 
 from backend.agent_tools import _extract_paths_from_tool_text, _get_tools
 
+# LLM 意图识别层，用于判断指代追问
+from backend.query_understanding import classify_intent
+
 TOOL_NAME_ALIASES = {
     "recipe_query": "recipe_query_tool",
     "recipe": "recipe_query_tool",
@@ -188,6 +191,61 @@ def _query_source_for_repair(current_user_text: str | None, history: list[dict] 
     return user_text or None
 
 
+def _build_recipe_context_from_history(history: list[dict] | None) -> dict | None:
+    """从 history 中提取最近一轮对话，以纯文本形式提供给 classify_intent。
+
+    让 LLM 自己判断上下文中的菜名和指代关系，不用正则提取。
+    """
+    if not history or len(history) < 1:
+        return None
+
+    # 取最近一轮 user + assistant 的原文
+    last_user: str | None = None
+    last_assistant: str | None = None
+
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        content = str(item.get("content") or "")
+
+        if role == "user" and last_user is None:
+            last_user = content
+        elif role in ("assistant", "ai") and last_assistant is None:
+            last_assistant = content
+
+        if last_user is not None and last_assistant is not None:
+            break
+
+    if last_user is None and last_assistant is None:
+        return None
+
+    ctx: dict[str, str] = {}
+    if last_user:
+        ctx["last_query"] = last_user[:200]
+    if last_assistant:
+        # 取回答开头（包含了菜名信息）即可
+        ctx["last_answer_head"] = last_assistant[:300]
+
+    return ctx if ctx else None
+
+
+def _resolve_followup_via_intent_classifier(query: str, history: list[dict] | None) -> str:
+    """通过 LLM 意图分类器判断 query 是否是指代追问，若是则返回补全后的查询。
+
+    不依赖正则提取菜名，直接把最近一轮对话原文喂给 LLM，
+    让意图识别层自己判断上下文关联。
+    """
+    recipe_ctx = _build_recipe_context_from_history(history)
+    if not recipe_ctx:
+        return query
+
+    intent = classify_intent(query, recipe_context=recipe_ctx)
+
+    if intent.intent == "recipe_followup_query" and intent.resolved_query:
+        return intent.resolved_query
+
+    return query
 def _normalize_tool_call_args(
     tool_name: str,
     args: dict,
@@ -223,6 +281,17 @@ def _normalize_tool_call_args(
         return normalized, "工具参数无效：用户只是确认/同意，但当前上下文里没有可恢复的原始问题。"
 
     normalized["query"] = str(raw_query).strip()
+
+    # ── 指代追问：通过 LLM 意图识别层判断 ──
+    # 把 query 和 history 中的上下文交给 classify_intent，让 LLM 自己决定
+    # 是否需要补全菜名。如果 LLM 认为是指代追问，resolved_query 会包含
+    # 补全后的完整查询。
+    if tool_name == "recipe_query_tool":
+        resolved = _resolve_followup_via_intent_classifier(normalized["query"], history)
+        if resolved != normalized["query"]:
+            print(f"  [QU 意图识别] query 改写: \"{normalized['query']}\" → \"{resolved}\"", flush=True)
+            normalized["query"] = resolved
+
     return normalized, None
 
 

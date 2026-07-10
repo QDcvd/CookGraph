@@ -14,6 +14,8 @@ import re
 from typing import Literal
 from urllib import request, error
 
+from backend.llm_endpoint import ensure_llm_endpoint
+
 
 PlanType = Literal[
     "unsupported",
@@ -151,7 +153,7 @@ def _build_llm_query_plan(raw: str, node_names_by_type: dict[str, set[str]]) -> 
 
 
 def _call_llm_router(raw: str, node_names_by_type: dict[str, set[str]]) -> dict | None:
-    base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:51234/v1").rstrip("/")
+    base_url = ensure_llm_endpoint(os.getenv("LLM_BASE_URL", "http://127.0.0.1:51234/v1")).rstrip("/")
     api_key = os.getenv("LLM_API_KEY", "not-needed")
     model = os.getenv("LLM_MODEL", "qwen3-4b")
     timeout = _safe_float(os.getenv("QUERY_PLAN_LLM_TIMEOUT"), 12.0)
@@ -188,7 +190,23 @@ def _call_llm_router(raw: str, node_names_by_type: dict[str, set[str]]) -> dict 
         with request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
     except (OSError, error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
+        retry_base_url = ensure_llm_endpoint(base_url, force_retry=True).rstrip("/")
+        if retry_base_url == base_url:
+            return None
+        req = request.Request(
+            f"{retry_base_url}/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except (OSError, error.URLError, TimeoutError, json.JSONDecodeError):
+            return None
 
     content = (
         data.get("choices", [{}])[0]
