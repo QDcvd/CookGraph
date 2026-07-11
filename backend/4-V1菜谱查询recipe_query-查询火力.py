@@ -27,7 +27,7 @@ ATTRIBUTE_CONFIG_PATH = 'config/recepi/attribute_config.csv'
 KEYWORD_CONFIG_PATH = 'config/recepi/keyword_config.json'
 
 # 知识图谱数据路径
-DEFAULT_KG_PATH = 'output/2kg_chem+recipe/chem+recipe_kg_updated_fire.pkl'
+DEFAULT_KG_PATH = 'config/2kg_chem+recipe_fire_12K.pkl'
 
 # 模糊匹配阈值 (0-1，越高越严格)
 FUZZY_THRESHOLD = 0.6

@@ -27,7 +27,7 @@ from backend.recipe_semantic_retriever import RecipeSemanticMatch, semantic_matc
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = Path(__file__).resolve().parent / "4-V1菜谱查询recipe_query-查询火力.py"
-DEFAULT_RECIPE_KG_PATH = PROJECT_ROOT / "config" / "chem+recipe_kg_updated_fire.pkl"
+DEFAULT_RECIPE_KG_PATH = PROJECT_ROOT / "config" / "2kg_chem+recipe_fire_12K.pkl"
 DEFAULT_ALIAS_PATH = PROJECT_ROOT / "config" / "recipe_aliases.json"
 DEFAULT_REVERSE_ENTITY_ALIAS_PATH = PROJECT_ROOT / "config" / "reverse_entity_aliases.json"
 
@@ -149,6 +149,18 @@ def _normalize_query_text(query: str) -> str:
     return re.sub(r"\s+", "", query.lower())
 
 
+def _contains_graph_dish_name(query: str, system: Any) -> bool:
+    """Whether the user text already contains a standard dish name from the KG."""
+    normalized = _normalize_query_text(query)
+    if not normalized:
+        return False
+    for dish_name in sorted(_kg_dish_names(system), key=len, reverse=True):
+        normalized_dish_name = _normalize_query_text(dish_name)
+        if len(normalized_dish_name) >= 2 and normalized_dish_name in normalized:
+            return True
+    return False
+
+
 def _load_alias_groups() -> list[set[str]]:
     global _alias_groups_cache
     if _alias_groups_cache is not None:
@@ -195,6 +207,9 @@ def _alias_rewrite_query(query: str, system: Any) -> tuple[str, str | None]:
     text = str(query or "").strip()
     normalized = _normalize_query_text(text)
     if not normalized:
+        return query, None
+
+    if _contains_graph_dish_name(text, system):
         return query, None
 
     for dish_name in sorted(_kg_dish_names(system), key=len, reverse=True):
@@ -1188,7 +1203,7 @@ def query_recipe_kg(query: str, kg_path: str | None = None) -> str:
     effective_query, alias_note = _alias_rewrite_query(text, system)
     semantic_match = None
     semantic_note = alias_note
-    if effective_query == text:
+    if effective_query == text and not _contains_graph_dish_name(text, system):
         effective_query, semantic_match, semantic_note = _semantic_rewrite_query(text, system)
 
     # 执行查询，捕获 stdout

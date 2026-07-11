@@ -1,0 +1,41 @@
+{
+  "chem_files": 0,
+  "recipe_files": 1,
+  "nodes_chem": 0,
+  "nodes_recipe": 13712,
+  "nodes_added_this_run": 36428,
+  "edges_added_this_run": 211470,
+  "source_kg": "output\\2kg_chem+recipe\\chem+recipe_kg_updated_fire.pkl",
+  "output_kg": "output\\2kg_chem+recipe_fire_12K\\2kg_chem+recipe_fire_12K.pkl",
+  "attributes_mapped": [
+    "cook_id",
+    "cooking_tips烹饪小提示",
+    "备菜过程",
+    "下锅过程",
+    "cooking_method烹饪方法"
+  ],
+  "total_nodes": 75242,
+  "total_edges": 358690,
+  "updated_at": "2026-07-10T23:41:05.151188",
+  "label_distribution": {
+    "reaction_name": 9418,
+    "reaction_catalog_1": 1,
+    "reaction_catalog_2": 4,
+    "AA_sugars_name": 1188,
+    "reaction_SMILE": 4801,
+    "rxn_InchI": 4797,
+    "Reactant_SMILES": 3033,
+    "Molecule": 6158,
+    "Reactant_InChI": 3033,
+    "Product_SMILES": 3050,
+    "Product_InChI": 3050,
+    "Dish": 13214,
+    "Technique": 81,
+    "CookingMethod": 13759,
+    "Taste": 55,
+    "Cuisine": 114,
+    "Ingredient": 1100,
+    "Seasoning": 313,
+    "MealTime": 8073
+  }
+}
