@@ -1,6 +1,6 @@
 # 用户发消息后的调用链
 
-本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、确定性菜谱路由、Agent 工具循环、Clarification Gate、Context Followup Gate、Query Understanding、结构化反向查询、菜谱混合召回、知识图谱查询、联网兜底、最终回答约束、SSE 回传和 SQLite 落库的完整链路。
+本文说明 MiniCookingAgent-Demo 当前版本在用户发送一条消息后，从前端、会话持久化、runtime memory、确定性菜谱路由、Agent 工具循环、Clarification Gate、Context Followup Gate、Query Understanding、结构化反向查询、菜谱混合召回、12K 菜谱知识图谱查询、联网兜底、最终回答约束、SSE 回传和 SQLite 落库的完整链路。
 
 ## 当前关键变化
 
@@ -8,16 +8,18 @@
 - 后端 `memory_store` 是运行期缓存，`data/memory.sqlite3` 是进程重启后的事实来源。
 - 用户消息写入后，会立即抽取长期偏好并写入 `preference_memory`。
 - 每轮请求都会构造 Zleap-lite runtime memory，注入长期偏好和当前 session 菜谱上下文。
-- `stream_search_agent()` 先跑 `_preflight_recipe_action()`，包含三层决策：
-  1. **确认联网回复**：用户说"搜一下""好的"时，从 history 中提取上一轮待联网 query 执行
-  2. **上下文菜谱动作**：`_contextual_recipe_action()` 处理属性追问（"它蒸多久"）等快捷路由
-  3. **Clarification Gate**：`decide_clarification()` + `build_choice_prompt()`，对疑似错字菜名/正向推荐歧义/待联网确认等场景返回结构化追问（ChoicePromptCard）
+- `stream_search_agent()` 先跑 `route_query(user_text, history)`，返回 `content` / `direct_chat` / `tool` / `fallback_tool_loop` 四类动作。
+- `route_query()` 当前顺序是：图谱统计 → 当前菜品属性追问补全 → `decide_clarification()` → `classify_intent()` → 必要时退回模型工具循环。
+- `decide_clarification()` 会处理明确联网、已知菜名、缺菜名属性问题、疑似错字菜名、口味+食材的推荐/单菜歧义，并在需要时返回 ChoicePromptCard。
 - `recipe_query_tool` 仍是唯一菜谱工具。Query Understanding、结构化反向查询、菜谱混合召回、别名改写都藏在这个工具内部。
+- 默认知识图谱已经切到 `config/2kg_chem+recipe_fire_12K.pkl`：约 7.5 万节点、35.8 万条关系、13214 道菜；旧小图 `chem+recipe_kg_updated_fire.pkl` 仅作为备份。
 - `query_recipe_kg()` 现在有三层分流：
   1. **Query Plan 层**（`query_plan.py`）：处理实体查找和组合推荐
   2. **Query Understanding 层**（`query_understanding.py`）：分类意图
-  3. **旧链路**：别名改写 + 语义召回 + 旧 parser 正向查询
+  3. **旧链路**：标准菜名短路 + 别名改写 + 混合召回 + 旧 parser 正向查询
 - 反向查询通过 `execute_reverse_query()` 直接查图谱节点和边关系。
+- 正向菜谱查询如果已经包含图谱标准菜名（如“小炒黄牛肉”），会跳过语义召回，直接进入 `RecipeQuerySystem.query()`，避免别名把标准菜名误改写成别的菜。
+- 菜名召回使用 alias、字符 TF-IDF、`gte-large-zh` dense embedding 和 RRF 融合；索引缓存位于 `backend/.cache/recipe_semantic_index.npz`，菜名列表或 Excel 变化后会自动重建。
 - `_emit_final_answer_from_tool_context()` 新增 Choice Prompt 集成（web_search_choice_prompt），前端展示选择卡片。
 - assistant 最终回答和本轮 `rag_trace`（含 `token_usage` 和 `choice_prompt`）一起持久化。
 
@@ -48,22 +50,17 @@ flowchart TD
     P --> Q["SSE event_generator()"]
 
     Q --> R["stream_search_agent(user_text, history)"]
-    R --> R1["_preflight_recipe_action()"]
+    R --> R1["route_query(user_text, history)"]
 
-    R1 --> R1A{"确认联网回复?"}
-    R1A -->|是| R1B["提取 pending_recipe_web_search<br/>执行 web_search_tool"]
-    R1A -->|否| R1C{"上下文属性追问?"}
-    R1C -->|是| R1D["补充菜名后调 recipe_query_tool"]
-    R1C -->|否| R1E{"Clarification Gate<br/>decide_clarification()"}
+    R1 --> R1A{"router action"}
+    R1A -->|content| R1B["直接返回澄清文本<br/>可携带 ChoicePromptCard"]
+    R1A -->|direct_chat| R1C["打招呼/非菜谱<br/>直接回答"]
+    R1A -->|tool| R1D["前置路由指定工具<br/>recipe_query_tool / web_search_tool"]
+    R1A -->|fallback_tool_loop| S["进入模型工具循环"]
 
-    R1E -->|ask| R1F["build_choice_prompt()<br/>返回结构化追问 + ChoicePromptCard"]
-    R1E -->|execute| R1G["执行确认后的工具调用"]
-    R1E -->|none| S["进入模型工具循环"]
-
-    R1B --> Z["_append_tool_result_to_trace()"]
-    R1D --> Z
-    R1F --> Y1["SSE choice_prompt event"]
-    R1G --> Z
+    R1B --> AH
+    R1C --> AH
+    R1D --> U
 
     S --> T{"模型是否调用工具?"}
     T -->|结构化 tool_calls| U["_execute_tool_call()"]
@@ -75,19 +72,23 @@ flowchart TD
     X -->|recipe_query_tool| Y["query_recipe_kg(query)"]
     X -->|web_search_tool| Z1["DDGS().text()"]
 
-    Y --> YA["build_query_plan()"]
+    Y --> Y0["_get_recipe_system()<br/>加载 2kg_chem+recipe_fire_12K.pkl"]
+    Y0 --> YA["build_query_plan()"]
     YA -->|plan 被支持| YB["execute_query_plan()+compose_plan_result()"]
     YA -->|plan 不被支持| YC["classify_intent()"]
 
     YC --> YD{"intent 类型"}
-    YD -->|forward| YE["别名改写 + 语义召回"]
+    YD -->|forward| YE{"已包含图谱标准菜名?"}
     YD -->|reverse| YF["execute_reverse_query()"]
     YD -->|ambiguous| YG["format_ambiguous_query()"]
     YD -->|non_recipe| YH["format_non_recipe()"]
     YD -->|forward_unknown| YI["旧 parser 正向"]
 
     YF --> Z; YG --> Z; YH --> Z
-    YE --> YK["RecipeQuerySystem.query()"]
+    YE -->|是| YE1["跳过语义召回<br/>保留用户原 query"]
+    YE -->|否| YE2["别名改写 + 混合召回<br/>alias + TF-IDF + gte-large-zh + RRF"]
+    YE1 --> YK["RecipeQuerySystem.query()<br/>NetworkX 精确查询"]
+    YE2 --> YK
     YI --> YK
     YK --> YL{"未命中且允许联网?"}
     YL -->|是| YM["_execute_web_fallback_after_recipe()"]
@@ -137,28 +138,30 @@ flowchart TD
     Q --> R["archive_chat_session()"]
 ```
 
-## 0.2 预检路由 + Clarification Gate
+## 0.2 前置查询路由 + Clarification Gate
 
 ```mermaid
 flowchart TD
-    A["_preflight_recipe_action(user_text, history)"] --> B{"_looks_like_affirmative_web_search_reply?"}
-    B -->|是| C["提取 pending_recipe_web_search<br/>返回 tool: web_search_tool"]
-    B -->|否| D["_contextual_recipe_action()"]
+    A["route_query(user_text, history)"] --> B["kg_dish_names()<br/>读取当前图谱菜名"]
+    B --> C{"_looks_like_graph_dish_count_query?"}
+    C -->|是| C1["action=tool<br/>recipe_query_tool"]
+    C -->|否| D["_recipe_context_from_history()<br/>提取当前菜品"]
 
-    D --> E{"是否上下文属性追问?"}
-    E -->|是| F["补充菜名后调 recipe_query_tool"]
-    E -->|否| G["decide_clarification()<br/>clarification_gate.py"]
+    D --> E{"_contextual_attribute_query?"}
+    E -->|是| E1["补全当前菜名<br/>action=tool: recipe_query_tool"]
+    E -->|否| F["decide_clarification()<br/>clarification_gate.py"]
 
-    G --> H{"action 类型"}
-    H -->|ask| I["build_choice_prompt()<br/>选择卡片"]
-    H -->|execute| J["执行确认后的工具"]
-    H -->|none| K["返回 None<br/>进入模型工具循环"]
+    F --> G{"clarification.action"}
+    G -->|ask| G1["action=content<br/>pending_clarification + choice_prompt"]
+    G -->|execute| G2["action=tool<br/>recipe_query_tool / web_search_tool"]
+    G -->|none| H["classify_intent()"]
 
-    I --> L["返回 content + pending_clarification + choice_prompt"]
-    J --> M["返回 tool 指令"]
-    K --> N["stream_search_agent 继续"]
-
-    C --> M; F --> M
+    H --> I{"intent"}
+    I -->|greeting/non_recipe| I1["action=direct_chat"]
+    I -->|ambiguous| I2["action=content"]
+    I -->|recipe_followup + resolved_query| I3["action=tool<br/>recipe_query_tool"]
+    I -->|forward/reverse/unknown recipe| I4["action=tool<br/>recipe_query_tool"]
+    I -->|未覆盖| I5["action=fallback_tool_loop<br/>进入模型工具循环"]
 ```
 
 ## 0.3 query_recipe_kg 内部链路
@@ -167,7 +170,7 @@ flowchart TD
 flowchart TD
     A["query_recipe_kg(query)"] --> B{"query 为空?"}
     B -->|是| B1["返回错误"]
-    B -->|否| C["_get_recipe_system()"]
+    B -->|否| C["_get_recipe_system()<br/>默认 12K 大图"]
 
     C --> D1["build_query_plan()"]
     D1 --> D2{"plan.supported?"}
@@ -190,8 +193,11 @@ flowchart TD
     G1 --> DONE; G2 --> DONE
 
     G4 --> H["旧反向兜底"]
-    H --> I["别名改写 + 语义召回"]
-    I --> J["RecipeQuerySystem.query()"]
+    H --> I{"_contains_graph_dish_name()?"}
+    I -->|是| I1["跳过语义召回<br/>避免标准菜名被误改写"]
+    I -->|否| I2["别名改写 + 混合召回<br/>alias + TF-IDF + gte-large-zh + RRF"]
+    I1 --> J["RecipeQuerySystem.query()<br/>pickle -> networkx.DiGraph"]
+    I2 --> J
     J --> K{"未命中且允许联网?"}
     K -->|是| L["标记 fallback_needed"]
     K -->|否| M["格式化为 human_readable"]
@@ -276,8 +282,8 @@ frontend/src/stores/chat.ts
     → backend/context_manager.py
     → backend/session_recipe_context.py
     → backend/agent_adapter_local_LLM_harness.py
-      → _preflight_recipe_action()
-        → clarification_gate.py / context_followup_gate.py
+      → route_query()
+        → clarification_gate.py / query_understanding.py
       → stream_search_agent()
         → recipe_query_tool
           → backend/recipe_query_adapter.py

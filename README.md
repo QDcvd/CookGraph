@@ -2,13 +2,53 @@
 
 这是一个迷你烹饪问答机器人项目，基于 FastAPI + Vue + OpenAI 兼容本地/远端模型工具循环实现，面向菜谱、食材和烹饪技法等中文问答场景。
 
+## 核心架构图
+
+下面这张图来自 [doc/USER_MESSAGE_CALL_CHAIN.md](doc/USER_MESSAGE_CALL_CHAIN.md) 的主链路，README 里放的是压缩版总览：
+
+```mermaid
+flowchart TD
+    A["用户提问"] --> B["Vue Chat<br/>SSE 请求 /chat/stream"]
+    B --> C["FastAPI app.py<br/>会话恢复 + 消息入库"]
+    C --> D["Zleap-lite Runtime Memory<br/>长期偏好 + 当前菜谱上下文"]
+    D --> E["agent_adapter_local_LLM_harness<br/>前置查询路由 + 工具循环"]
+
+    E --> F{"前置路由能决定?"}
+    F -->|上下文追问/明确联网/澄清选择| G["确定性动作<br/>recipe_query_tool / web_search_tool / choice_prompt"]
+    F -->|不能| H["本地/远端 LLM<br/>结构化 tool_call"]
+
+    H --> I{"工具"}
+    I -->|recipe_query_tool| J["query_recipe_kg()"]
+    I -->|web_search_tool| K["联网搜索兜底"]
+    G --> J
+    G --> K
+
+    J --> L["Query Plan<br/>实体查找/组合推荐"]
+    L --> M["Query Understanding<br/>正向/反向/歧义/非菜谱"]
+    M --> N{"查询类型"}
+    N -->|反向查询| O["execute_reverse_query()<br/>按食材/技法/口味/菜系查边"]
+    N -->|正向菜谱| P["别名改写 + 混合召回<br/>alias + TF-IDF + gte-large-zh + RRF"]
+    N -->|已含标准菜名| Q["跳过语义召回<br/>直接精确查图谱"]
+    P --> R["NetworkX 菜谱知识图谱<br/>2kg_chem+recipe_fire_12K.pkl"]
+    Q --> R
+    O --> R
+    R --> S{"本地图谱命中?"}
+    S -->|否且允许| K
+    S -->|是| T["Grounded Answer<br/>基于工具结果生成最终回答"]
+    K --> T
+    T --> U["SSE 返回<br/>content / rag_trace / token_usage / choice_prompt"]
+    U --> V["SQLite 持久化<br/>chat_sessions + chat_messages"]
+```
+
 ## 能做什么
 
 - 直接回答烹饪、食材、菜谱、菜单相关问题。
-- 使用 `recipe_query_tool` 查询本地菜谱知识图谱（38814 个节点、15 万条关系），支持正向属性查询、反向关系查询、完整档案查询。
+- 使用 `recipe_query_tool` 查询本地菜谱知识图谱（约 7.5 万节点、35.8 万条关系、13214 道菜），支持正向属性查询、反向关系查询、完整档案查询。
 - **Query Understanding**：反向查询先经过结构化意图识别，区分食材、技法、口味、菜系；不确定时追问，不靠模型硬猜。
 - **图谱节点名词召回**：反向查询的向量化对象是图谱节点名词（如 `牛肉`、`香辣味`、`川菜`、`蒸制`），不是菜谱正文。
-- **确定性路由**：`_preflight_recipe_action()` 在模型工具循环前拦截常见模式（反向食材查询、属性追问、裸菜名），直接走图谱。
+- **混合菜名召回**：正向菜谱问题使用别名、字符 TF-IDF、`gte-large-zh` 向量和 RRF 融合，把“西红柿炒鸡蛋”归一到图谱标准菜名。
+- **精确菜名保护**：如果用户问题已经包含图谱标准菜名（如“小炒黄牛肉”），跳过语义改写，直接查图谱，避免别名误替换。
+- **前置查询路由**：`route_query()` 在模型工具循环前处理打招呼/非菜谱直答、图谱统计、上下文属性追问、澄清选择、明确联网、已知菜名和菜谱意图。
 - **结构化反向执行**：反向查询绕过旧自然语言 parser，通过 `execute_reverse_query()` 直接查图谱节点和边关系。
 - **Grounded Answer**：最终回答有 4 级确定性兜底（联网结果→联网提议→反向查询→菜谱命中），尽量不走模型生成。
 - **Clarification Gate**：多类型歧义词（如"蒜蓉"可能指辅料或技法）返回结构化追问，不走模型硬猜。
@@ -25,7 +65,7 @@ miniCookingAgent-Demo/
 ├── backend/
 │   ├── app.py                              # FastAPI 主应用
 │   ├── context_manager.py                  # 对话上下文组装（Zleap 风格）
-│   ├── agent_adapter_local_LLM_harness.py  # 推荐适配器（工具循环 + 预检路由）
+│   ├── agent_adapter_local_LLM_harness.py  # 推荐适配器（前置查询路由 + 工具循环）
 │   ├── agent_adapter_local_LLM.py          # 本地 vLLM 基础版
 │   ├── agent_adapter.py                    # DeepSeek API 适配器
 │   ├── agent_tools.py                      # 工具定义（@tool 装饰器）
@@ -44,7 +84,9 @@ miniCookingAgent-Demo/
 │   ├── session_recipe_context.py           # 当前会话菜谱上下文管理
 │   └── 4-V1菜谱查询recipe_query-查询火力.py  # 菜谱知识图谱查询系统
 ├── config/
-│   ├── chem+recipe_kg_updated_fire.pkl     # 菜谱知识图谱（约 16MB）
+│   ├── 2kg_chem+recipe_fire_12K.pkl        # 默认菜谱知识图谱（13214 道菜，含 50 道火力增强菜）
+│   ├── chem+recipe_kg_updated_fire.pkl     # 小图备份（50 道火力增强菜）
+│   ├── build_stats.json                    # 图谱构建统计
 │   ├── recepi/                             # 实体/关系/属性配置文件
 │   ├── recipe_aliases.json                 # 菜名同义词典
 │   └── reverse_entity_aliases.json         # 反向查询实体归并配置
@@ -110,13 +152,14 @@ bash deploy_uv.sh --start
 bash deploy_uv.sh --no-parallel
 ```
 
-脚本默认使用国内镜像源：
+脚本默认优先使用本机 Python；缺 Python 时 uv 会按 `UV_PYTHON_INSTALL_MIRROR` 下载解释器。Python/npm 包索引默认使用官方源，可按网络情况切镜像：
 
 ```ini
-UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+UV_INDEX_URL=
 NPM_REGISTRY=https://registry.npmmirror.com
 MODEL_SOURCE=modelscope
 MODELSCOPE_MODEL_ID=AI-ModelScope/gte-large-zh
+UV_PYTHON_INSTALL_MIRROR=https://registry.npmmirror.com/-/binary/python-build-standalone/
 UV_CONCURRENT_DOWNLOADS=8
 UV_CONCURRENT_BUILDS=4
 ```
@@ -211,25 +254,26 @@ LLM_SSH_TUNNEL=0
 
 推荐适配器是 `backend/agent_adapter_local_LLM_harness.py`。它把运行时实际注册的工具列表塞进中文系统提示词，并让模型通过结构化 `tool_call` 调用：
 
-### 确定性预检路由
+### 前置查询路由
 
-进入模型工具循环前，先运行 `_preflight_recipe_action()` 拦截常见模式：
+进入模型工具循环前，`stream_search_agent()` 会先调用 `route_query(user_text, history)`。这个路由器返回四类动作：`content`、`direct_chat`、`tool`、`fallback_tool_loop`。
 
-- **反向食材查询**（"牛肉可以做什么菜"）：直接调 `recipe_query_tool`，跳过模型
-- **明确新菜名覆盖旧上下文**（提到了新的已知菜名）
-- **裸菜式短语**（"麻婆豆腐""红烧排骨"）
-- **上下文属性追问**（"它蒸多久"）：补充上一轮菜名后调工具
-- **缺菜名澄清**（"火力要怎么控制"）：直接要求补充菜名，不进工具循环
+当前真实顺序是：
+
+- **图谱统计**：如“本地收录多少道菜”，直接调用 `recipe_query_tool`。
+- **上下文属性追问**：如果历史里有当前菜品，用户只问“火力呢”“需要哪些调料”“注意事项”，会补全成“当前菜品 + 属性”后调用 `recipe_query_tool`。
+- **Clarification Gate**：`decide_clarification()` 处理明确联网、已知菜名、缺菜名属性问题、疑似错字菜名、口味+食材的推荐/单菜歧义。
+- **意图分类**：`classify_intent()` 将打招呼和非菜谱问题直接回答；将上下文追问、正向菜谱、未知菜谱、反向查询路由到 `recipe_query_tool`；无法覆盖时才进入模型工具循环。
 
 ### 工具循环
 
-未命中预检路由的问题进入模型工具循环：
+前置路由返回 `fallback_tool_loop` 的问题才进入模型工具循环：
 
 - `recipe_query_tool(query)`：查询本地菜谱知识图谱，内部经过三层分流：
   1. **Query Plan 层**（`query_plan.py`）：实体查找/组合推荐
   2. **Query Understanding 层**（`query_understanding.py`）：意图分类为 forward_recipe_query / reverse_query / ambiguous_query / non_recipe_query / forward_unknown_recipe_query / legacy_forward_parser
-  3. **旧链路**：别名改写 + 语义召回 + 旧 parser 正向查询
-- `web_search_tool(query)`：联网搜索公开网页信息（仅当菜谱知识图谱未命中且允许联网兜底时使用）。
+  3. **旧链路**：标准菜名短路 + 别名改写 + 混合召回 + 旧 parser 正向查询
+- `web_search_tool(query)`：联网搜索公开网页信息；用户明确要求联网时可直接调用，本地图谱未命中且允许兜底时也会自动补一次。
 
 反向查询（如"牛肉怎么做""哪些菜用了蒜蓉""有什么川菜推荐"）不再进入旧自然语言 parser，而是通过 `execute_reverse_query()` 直接查图谱节点和边关系（`USES_MAIN_INGREDIENT` / `USES_TECHNIQUE` / `HAS_TASTE` / `BELONGS_TO_CUISINE`）。
 
@@ -320,8 +364,14 @@ python test/run_multiturn_dialogue_test.py --category contradiction
 
 ### 知识图谱文件
 
-菜谱知识图谱位于 `config/chem+recipe_kg_updated_fire.pkl`（约 16MB），包含 **38814 个节点、147352 条关系**。依赖 `networkx` 库反序列化。
+默认菜谱知识图谱位于 `config/2kg_chem+recipe_fire_12K.pkl`（约 51MB），包含 **75242 个节点、358690 条关系、13214 道菜**。其中 `chem+recipe_kg_updated_fire.pkl` 是小图备份，包含 50 道带 `fire_control_process` 的火力增强菜；大图已经完整包含小图节点、边和火力字段。
+
+图谱通过 `pickle` 反序列化为 `networkx.DiGraph`，查询层基于：
+
+- `dish_nodes`：菜名到节点 ID 的索引。
+- `all_nodes_by_label`：实体类型到节点名的索引。
+- `graph.edges()` / `graph.in_edges()`：正向和反向关系遍历。
 
 ### 调用链文档
 
-完整调用链见 [doc/USER_MESSAGE_CALL_CHAIN.md](doc/USER_MESSAGE_CALL_CHAIN.md)，包含 7 张 Mermaid 流程图（总流程 / 会话恢复 / Agent 工具决策 / query_recipe_kg 内部 / runtime memory / 最终回答约束 / SSE 渲染）。
+完整调用链见 [doc/USER_MESSAGE_CALL_CHAIN.md](doc/USER_MESSAGE_CALL_CHAIN.md)，包含 Mermaid 流程图（总流程 / 会话恢复 / 前置查询路由 / query_recipe_kg 内部 / runtime memory / 最终回答约束 / SSE 渲染）。README 上方的“核心架构图”是该文档主链路的压缩版。
