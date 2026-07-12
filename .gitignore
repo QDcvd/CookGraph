@@ -60,6 +60,12 @@ doc/mmdc-puppeteer-config.json
 # ── Office 临时文件 ──
 ~$*
 
+# ── 本地原始资料（不进入公开仓库） ──
+reference/inputMenu/
+reference/targetTemplate/
+doc/*.xlsx
+doc/*.docx
+
 # ── 日志 ──
 *.log
 backend-error.log
