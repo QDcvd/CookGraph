@@ -360,43 +360,56 @@ def retrieve_recommendations(query: RecommendationQuery, top_k: int = 5) -> list
 
 
 def format_recommendation_answer(query: RecommendationQuery, candidates: list[RecommendationCandidate]) -> str:
-    """格式化为 recipe_query_tool 可直接返回的文本。"""
+    """生成面向用户的推荐文案；召回分数等信息只留在结构化 data 中。"""
     if query.needs_clarification:
-        return (
-            f"{query.clarification_reason}\n\n"
-            "结构化摘要：\n"
-            "success: False\n"
-            "query_type: recommendation\n"
-            "match_mode: needs_clarification\n"
-            "web_fallback_allowed: False"
-        )
+        return "我可以帮你搭配菜谱。你手头有哪些具体食材，或者想要什么口味？比如：我有牛肉和青椒，想做一道下饭菜。"
 
     if not candidates:
-        return (
-            "本地图谱里暂时没有找到符合条件的推荐菜。\n\n"
-            "结构化摘要：\n"
-            "success: False\n"
-            "query_type: recommendation\n"
-            "match_mode: none\n"
-            "web_fallback_allowed: False"
-        )
+        return "我暂时没有找到完全匹配的菜。你可以少限定一个条件，或者告诉我更具体的食材和口味，我再帮你换个方向找找。"
 
-    lines = ["本地图谱里优先推荐这几道：", ""]
-    for index, candidate in enumerate(candidates, start=1):
+    ingredient_text = "、".join(_display_ingredient(item) for item in query.core_ingredients)
+    if query.cuisines:
+        intro = f"按你想吃的{query.cuisines[0]}口味，{ingredient_text or '这些条件'}可以试试："
+    elif query.scenario_tags:
+        intro = f"按“{'、'.join(query.scenario_tags[:2])}”这个方向，我先帮你挑了几道："
+    elif ingredient_text:
+        intro = f"根据你手头的{ingredient_text}，我先帮你挑了几道："
+    else:
+        intro = "我先帮你挑了几道，看看有没有合口味的："
+
+    display_limit = min(5, len(candidates))
+    lines = [intro, ""]
+    for index, candidate in enumerate(candidates[:display_limit], start=1):
         lines.append(f"{index}. {candidate.dish_name}")
-        lines.append("   推荐理由：" + "；".join(candidate.graph_reasons[:2]))
-        lines.append(f"   召回分数：{candidate.score:.3f}；向量相似度：{candidate.vector_score:.3f}")
+        reasons = [_friendly_recommendation_reason(reason) for reason in candidate.graph_reasons[:2]]
+        reasons = [reason for reason in reasons if reason]
+        if reasons:
+            lines.append("   " + "；".join(reasons))
         lines.append("")
-    lines.extend(
-        [
-            "结构化摘要：",
-            "success: True",
-            "query_type: recommendation",
-            "match_mode: hybrid_recommendation",
-            "web_fallback_allowed: False",
-        ]
-    )
+    lines.append("想看哪一道的完整做法？直接告诉我菜名就行。")
     return "\n".join(lines).rstrip()
+
+
+def _display_ingredient(value: str) -> str:
+    return str(value or "").replace("猪肉(瘦)", "瘦肉")
+
+
+def _friendly_recommendation_reason(reason: str) -> str:
+    """把检索层理由翻译成用户能快速理解的表达。"""
+    text = str(reason or "").strip()
+    replacements = (
+        ("命中全部核心食材：", "主要食材有"),
+        ("命中核心食材：", "用到了"),
+        ("命中弱食材：", "还可以搭配"),
+        ("匹配菜系：", "属于"),
+        ("匹配口味：", "口味偏"),
+        ("匹配技法：", "做法是"),
+        ("匹配场景标签：", "适合"),
+    )
+    for old, new in replacements:
+        if text.startswith(old):
+            return new + _display_ingredient(text[len(old):])
+    return text
 
 
 def recommend_from_query(query: str, top_k: int = 5) -> str:

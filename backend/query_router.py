@@ -143,7 +143,7 @@ def _action_from_frame(frame: QueryFrame) -> QueryAction:
     if frame.needs_clarification:
         return QueryAction(
             action="content",
-            content=frame.clarification_question or "你是在追问上一道菜吗？请告诉我菜名。",
+            content=frame.clarification_question or "我猜你是在接着问上一道菜。告诉我具体菜名，我就能继续帮你查。",
             reason=frame.reason or "追问缺少上下文",
             query_frame=frame,
             confidence=frame.confidence,

@@ -23,8 +23,8 @@ def test_generic_meat_needs_clarification():
     query = normalize_recommendation_query("我有肉，可以做什么菜")
     assert query.needs_clarification
     answer = format_recommendation_answer(query, [])
-    assert "范围比较大" in answer
-    assert "match_mode: needs_clarification" in answer
+    assert "具体食材" in answer
+    assert "match_mode" not in answer
 
 
 def test_beef_and_pepper_recommendation_prefers_joint_matches():
@@ -56,6 +56,8 @@ def test_recipe_query_tool_uses_recommendation_for_ingredient_request():
     })
     assert output["query_type"] == "recommendation"
     assert output["web_fallback_allowed"] is False
+    assert "召回分数" not in output["message"]
+    assert "想看哪一道的完整做法" in output["message"]
 
 
 def test_recipe_query_tool_keeps_reverse_lookup_out_of_recommendation():

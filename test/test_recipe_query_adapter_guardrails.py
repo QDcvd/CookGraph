@@ -46,6 +46,26 @@ class RecipeQueryToolResultTests(unittest.TestCase):
         self.assertIn("prep_process", result["message"])
         self.assertEqual(result["data"]["alias_resolution"]["requested_dish"], "番茄炒蛋")
 
+    def test_full_recipe_is_rendered_as_user_facing_recipe_card(self):
+        result = query_recipe_plan({
+            "intent": "dish_detail_query",
+            "mode": "dish",
+            "dish": "辣椒炒肉",
+            "field": "full_recipe",
+            "show_all": True,
+            "source_text": "辣椒炒肉给一个完整的菜谱",
+        })
+        message = result["message"]
+        assert result["ok"] is True
+        assert message.startswith("根据本地菜谱图谱，辣椒炒肉可以这样做：")
+        assert "用料：" in message
+        assert "主要食材：" in message
+        assert "做法：" in message
+        assert "火力和时间：" in message
+        assert "以上内容来自本地菜谱知识图谱。" in message
+        assert "cook_id" not in message
+        assert "结构化摘要" not in message
+
     def test_unknown_single_dish_allows_web_fallback(self):
         result = query_recipe_plan({
             "intent": "dish_detail_query",

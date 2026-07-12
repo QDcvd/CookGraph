@@ -185,7 +185,7 @@ def _validate_query_frame(raw: dict, followup_requires_context: bool) -> QueryFr
         attribute=str(raw_slots.get("attribute") or "").strip() or None,
         resolved_query=str(raw.get("resolved_query") or "").strip() or None,
         needs_clarification=needs_clarification,
-        clarification_question="你是在追问上一道菜吗？请告诉我菜名。" if needs_clarification else None,
+        clarification_question="我猜你是在接着问上一道菜。告诉我具体菜名，我就能继续帮你查。" if needs_clarification else None,
         confidence=max(0.0, min(1.0, _safe_float(raw.get("confidence")))),
         reason=str(raw.get("reason") or "").strip(),
     )
@@ -206,7 +206,7 @@ def enforce_query_frame_contract(frame: QueryFrame) -> QueryFrame:
             frame,
             intent="ambiguous_query",
             needs_clarification=True,
-            clarification_question="请告诉我具体食材、口味、菜系或技法。",
+            clarification_question="当然可以，我可以帮你推荐。你手头有哪些食材，或者偏好什么口味、菜系？",
         )
 
     if frame.intent in {"dish_detail_query", "dish_existence_query", "missing_ingredients_query"} and not frame.dish_text:
@@ -215,7 +215,7 @@ def enforce_query_frame_contract(frame: QueryFrame) -> QueryFrame:
         return replace(
             frame,
             needs_clarification=True,
-            clarification_question="请告诉我具体菜名或你现有的食材，我才能帮你查询。",
+            clarification_question="没问题。告诉我具体菜名，或者说说你手头有哪些食材，我就能帮你查。",
         )
 
     return frame
@@ -254,7 +254,7 @@ def _ambiguous_frame(raw: str, reason: str) -> QueryFrame:
         source_text=raw,
         confidence=0.0,
         needs_clarification=True,
-        clarification_question="我暂时无法可靠判断你的查询类型，请说明具体菜名、食材或查询目标。",
+        clarification_question="我还不太确定你想查哪一类。可以告诉我菜名、手头食材，或者你想了解做法、火候还是推荐吗？",
         reason=reason,
     )
 

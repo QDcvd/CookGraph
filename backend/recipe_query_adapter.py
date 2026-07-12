@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,79 @@ def _has_field_value(result: dict, field: str | None) -> bool:
         return bool(result.get("success"))
     value = result.get("value")
     return value is not None and str(value).strip() not in {"", "无数据", "None", "null"}
+
+
+def _format_amount(name: Any, amount: Any) -> str:
+    name_text = str(name or "").strip()
+    amount_text = str(amount or "").strip()
+    return f"{name_text}（{amount_text}）" if amount_text else name_text
+
+
+def _relation_items(relations: dict, relation_type: str, *keys: str) -> list[dict]:
+    """Read one ingredient category while tolerating old/new relation labels."""
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for key in keys:
+        for item in relations.get(key, []) or []:
+            if str(item.get("type") or "") != relation_type:
+                continue
+            identity = (str(item.get("name") or ""), str(item.get("amount") or ""))
+            if identity not in seen:
+                seen.add(identity)
+                items.append(item)
+    return items
+
+
+def _format_steps(text: Any) -> list[str]:
+    """Split numbered recipe text into readable lines without inventing steps."""
+    raw = str(text or "").strip().replace("；", ";")
+    if not raw or raw in {"无数据", "None", "null"}:
+        return []
+    parts = re.split(r"(?:(?<=^)|(?<=[;；]))\s*(?=(?:\d+[.、]|步骤\d+[-—:：]))", raw)
+    steps = [part.strip(" ;；") for part in parts if part.strip(" ;；")]
+    return steps or [raw]
+
+
+def _format_full_recipe_result(result: dict) -> str:
+    """Render a graph archive as a user-facing complete recipe."""
+    dish = str(result.get("dish_name") or "这道菜").strip()
+    attributes = result.get("attributes") if isinstance(result.get("attributes"), dict) else {}
+    relations = result.get("relations") if isinstance(result.get("relations"), dict) else {}
+
+    main = _relation_items(relations, "USES_MAIN_INGREDIENT", "主要食材")
+    auxiliary = _relation_items(relations, "USES_AUXILIARY_INGREDIENT", "配料", "USES_AUXILIARY_INGREDIENT")
+    seasonings = _relation_items(relations, "USES_SEASONING", "调味品", "调味料")
+    if not main or not auxiliary or not seasonings:
+        food_list = relations.get("食材清单", []) or []
+        if not main:
+            main = [item for item in food_list if item.get("type") == "USES_MAIN_INGREDIENT"]
+        if not auxiliary:
+            auxiliary = [item for item in food_list if item.get("type") == "USES_AUXILIARY_INGREDIENT"]
+        if not seasonings:
+            seasonings = [item for item in food_list if item.get("type") == "USES_SEASONING"]
+
+    lines = [f"根据本地菜谱图谱，{dish}可以这样做：", "", "用料：", ""]
+    if main:
+        lines.append("主要食材：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in main))
+    if auxiliary:
+        lines.append("配料：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in auxiliary))
+    if seasonings:
+        lines.append("调味品：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in seasonings))
+
+    method_steps = _format_steps(attributes.get("cooking_method_desc"))
+    prep_steps = _format_steps(attributes.get("prep_process"))
+    cooking_steps = _format_steps(attributes.get("cooking_process"))
+    if method_steps:
+        lines.extend(["", "做法：", "", *method_steps])
+    elif prep_steps or cooking_steps:
+        lines.extend(["", "做法：", "", *prep_steps, *cooking_steps])
+
+    fire_steps = _format_steps(attributes.get("fire_control_process"))
+    if fire_steps:
+        lines.extend(["", "火力和时间：", "", *fire_steps])
+
+    lines.extend(["", "以上内容来自本地菜谱知识图谱。"])
+    return "\n".join(lines)
 
 
 def _query_type(mode: str, intent: str) -> str:
@@ -375,6 +449,8 @@ def query_recipe_plan(plan: dict, kg_path: str | None = None) -> dict:
             return vector_result
 
     message = str(result.get("human_readable") or "").strip()
+    if success and mode == "dish" and bool(plan.get("show_all")):
+        message = _format_full_recipe_result(result)
     if not message:
         message = "本地菜谱查询完成。" if success else "本地图谱没有找到符合条件的结果。"
     query_type = _query_type(mode, intent)
