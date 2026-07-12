@@ -16,6 +16,9 @@ venv/
 # ── 模型文件（大文件，需要单独下载） ──
 models/
 
+# ── 知识图谱二进制产物（不随公开仓库发布） ──
+config/2kg_chem+recipe_fire_12K.pkl
+
 # ── 运行时数据库 ──
 data/
 

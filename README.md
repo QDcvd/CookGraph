@@ -1,6 +1,6 @@
-# MiniCookingAgent-Demo — 迷你烹饪问答机器人
+# CookGraph — 中文菜谱知识图谱问答与推荐 Agent
 
-这是一个迷你烹饪问答机器人项目，基于 FastAPI + Vue + OpenAI 兼容本地/远端模型工具循环实现，面向菜谱、食材和烹饪技法等中文问答场景。
+CookGraph 是一个面向中文菜谱、食材和烹饪技法的知识图谱问答与推荐 Agent，基于 FastAPI + Vue + OpenAI 兼容本地/远端模型工具循环实现。
 
 ## 核心架构图
 
@@ -50,7 +50,7 @@ flowchart TD
 ## 项目结构
 
 ```text
-miniCookingAgent-Demo/
+CookGraph/
 ├── backend/
 │   ├── app.py                              # FastAPI 主应用
 │   ├── context_manager.py                  # 对话上下文组装（Zleap 风格）
@@ -78,7 +78,7 @@ miniCookingAgent-Demo/
 │   ├── schemas.py                           # API / SSE 数据结构
 │   └── llm_endpoint.py                      # 模型端点探活与重试
 ├── config/
-│   ├── 2kg_chem+recipe_fire_12K.pkl        # 默认菜谱知识图谱（13214 道菜，含 50 道火力增强菜）
+│   ├── 2kg_chem+recipe_fire_12K.pkl        # 本地准备的知识图谱，不随公开仓库发布
 │   ├── chem+recipe_kg_updated_fire.pkl     # 小图备份（50 道火力增强菜）
 │   ├── build_stats.json                    # 图谱构建统计
 │   ├── recepi/                             # 实体/关系/属性配置文件
@@ -185,6 +185,16 @@ UV_CONCURRENT_BUILDS=4
 
 如果 HuggingFace 镜像报 `SSL: UNEXPECTED_EOF_WHILE_READING`，优先使用默认的 `MODEL_SOURCE=modelscope`。
 
+### 准备知识图谱
+
+公开仓库不包含约 51 MB 的 `config/2kg_chem+recipe_fire_12K.pkl`。启动前请将知识图谱文件放置到以下路径：
+
+```text
+CookGraph/config/2kg_chem+recipe_fire_12K.pkl
+```
+
+如果没有该文件，后端仍可启动，但本地菜谱查询和推荐功能会返回“知识图谱文件不存在”。该文件属于运行数据，不应提交到公开 Git 仓库；构建推荐别名和向量索引时也需要先准备该文件。
+
 Windows 建议：
 
 - 推荐在 Git Bash 里运行 `bash deploy_uv.sh`。
@@ -197,7 +207,7 @@ Windows 建议：
 `start_docker.sh` **只支持在 Ubuntu / WSL / Linux shell 内运行**。Windows 用户请先进入 WSL/Ubuntu。
 
 ```bash
-cd /mnt/e/miniCookingAgent-Demo
+cd /mnt/e/CookGraph
 bash start_docker.sh
 ```
 
@@ -219,14 +229,14 @@ MODEL_SOURCE=huggingface bash start_docker.sh --rebuild
 PowerShell：
 
 ```powershell
-cd E:\miniCookingAgent-Demo
+cd E:\CookGraph
 .\.venv\Scripts\python.exe start.py
 ```
 
 Git Bash：
 
 ```bash
-cd /e/miniCookingAgent-Demo
+cd /e/CookGraph
 .venv/Scripts/python.exe start.py
 ```
 
@@ -382,7 +392,7 @@ python test/run_multiturn_dialogue_test.py --category contradiction
 
 ### 知识图谱文件
 
-默认菜谱知识图谱位于 `config/2kg_chem+recipe_fire_12K.pkl`（约 51MB），包含 **75242 个节点、358690 条关系、13214 道菜**。其中 `chem+recipe_kg_updated_fire.pkl` 是小图备份，包含 50 道带 `fire_control_process` 的火力增强菜；大图已经完整包含小图节点、边和火力字段。
+默认菜谱知识图谱路径是 `config/2kg_chem+recipe_fire_12K.pkl`（约 51MB，需单独准备），包含 **75242 个节点、358690 条关系、13214 道菜**。其中 `chem+recipe_kg_updated_fire.pkl` 是小图备份，包含 50 道带 `fire_control_process` 的火力增强菜；大图已经完整包含小图节点、边和火力字段。
 
 图谱通过 `pickle` 反序列化为 `networkx.DiGraph`，查询层基于：
 
