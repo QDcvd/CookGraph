@@ -11,7 +11,11 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal
 
 from backend.clarification_gate import build_choice_prompt, decide_clarification
-from backend.entity_resolver import extract_ingredient_slots_from_source, resolve as resolve_entities
+from backend.entity_resolver import (
+    ambiguous_entity_candidates,
+    extract_ingredient_slots_from_source,
+    resolve as resolve_entities,
+)
 from backend.query_understanding import (
     QueryFrame,
     classify_v2,
@@ -116,6 +120,52 @@ def _build_plan(frame: QueryFrame) -> dict:
     return plan
 
 
+def _ambiguous_ingredient_action(frame: QueryFrame) -> QueryAction | None:
+    ambiguous_ingredients = [
+        slot.raw for slot in frame.ingredients if slot.match_mode == "ambiguous" and slot.raw.strip()
+    ]
+    if not ambiguous_ingredients or frame.dish is not None or frame.intent not in {
+        "ingredient_combo_query",
+        "scenario_recommendation_query",
+        "reverse_entity_query",
+        "ambiguous_query",
+    }:
+        return None
+
+    questions = []
+    candidate_terms: list[str] = []
+    for name in ambiguous_ingredients:
+        candidates = ambiguous_entity_candidates(name)
+        candidate_terms.extend(candidates)
+        if candidates:
+            questions.append(f"“{name}”是指{'还是'.join(candidates)}吗？")
+        else:
+            questions.append(f"你说的“{name}”具体是哪一类食材呢？")
+    question = "；".join(questions)
+    return QueryAction(
+        action="content",
+        content=f"我想确认一下：{question}",
+        pending_clarification={
+            "type": "ambiguous_ingredient",
+            "payload": {
+                "original_query": frame.source_text,
+                "ambiguous": ambiguous_ingredients,
+                "known_ingredients": [
+                    slot.canonical or slot.raw
+                    for slot in frame.ingredients
+                    if slot.match_mode != "ambiguous" and slot.raw.strip()
+                ],
+                "candidate_terms": candidate_terms,
+            },
+            "question": f"我想确认一下：{question}",
+            "reason": "食材泛称存在多个图谱实体，不能擅自选择具体实体",
+        },
+        reason="食材泛称存在多个图谱实体，不能擅自选择具体实体",
+        query_frame=frame,
+        confidence=frame.confidence,
+    )
+
+
 def _action_from_frame(frame: QueryFrame) -> QueryAction:
     """Build the single recipe-tool action from a resolved QueryFrame."""
     if frame.intent == "greeting":
@@ -134,6 +184,9 @@ def _action_from_frame(frame: QueryFrame) -> QueryAction:
             query_frame=frame,
             confidence=frame.confidence,
         )
+    ambiguous_action = _ambiguous_ingredient_action(frame)
+    if ambiguous_action is not None:
+        return ambiguous_action
     if frame.intent == "ambiguous_query":
         return QueryAction(
             action="content",
@@ -147,38 +200,6 @@ def _action_from_frame(frame: QueryFrame) -> QueryAction:
             action="content",
             content=frame.clarification_question or "我猜你是在接着问上一道菜。告诉我具体菜名，我就能继续帮你查。",
             reason=frame.reason or "追问缺少上下文",
-            query_frame=frame,
-            confidence=frame.confidence,
-        )
-
-    ambiguous_ingredients = [
-        slot.raw for slot in frame.ingredients if slot.match_mode == "ambiguous" and slot.raw.strip()
-    ]
-    if ambiguous_ingredients and frame.dish is None and frame.intent in {
-        "ingredient_combo_query",
-        "scenario_recommendation_query",
-        "reverse_entity_query",
-    }:
-        names = "、".join(ambiguous_ingredients)
-        return QueryAction(
-            action="content",
-            content=f"你说的“{names}”范围比较大。请说明是猪肉、牛肉、鸡肉，还是其他肉类？",
-            pending_clarification={
-                "type": "ambiguous_ingredient",
-                "payload": {
-                    "original_query": frame.source_text,
-                    "ambiguous": ambiguous_ingredients,
-                    "known_ingredients": [
-                        slot.canonical or slot.raw
-                        for slot in frame.ingredients
-                        if slot.match_mode != "ambiguous" and slot.raw.strip()
-                    ],
-                    "candidate_terms": ["猪肉", "牛肉", "鸡肉", "羊肉", "鸭肉"],
-                },
-                "question": f"你说的“{names}”范围比较大。请说明具体是哪类食材。",
-                "reason": "食材泛称存在多个图谱实体，不能擅自选择具体实体",
-            },
-            reason="食材泛称存在多个图谱实体，不能擅自选择具体实体",
             query_frame=frame,
             confidence=frame.confidence,
         )

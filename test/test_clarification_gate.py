@@ -19,6 +19,25 @@ class ClarificationGateTests(unittest.TestCase):
         self.assertEqual(decision.pending_type, "missing_recipe_target")
         self.assertIn("哪道菜", decision.question or "")
 
+    def test_ambiguous_ingredient_confirmation_replaces_generic_entity(self):
+        history = [{
+            "role": "assistant",
+            "content": "我想确认一下：蛋是指鸡蛋还是鸭蛋吗？",
+            "rag_trace": {
+                "pending_clarification": {
+                    "type": "ambiguous_ingredient",
+                    "payload": {
+                        "original_query": "我有蛋，想做菜",
+                        "ambiguous": ["蛋"],
+                        "candidate_terms": ["鸡蛋", "鸭蛋"],
+                    },
+                }
+            },
+        }]
+        decision = decide_clarification("鸭蛋", history=history)
+        self.assertEqual(decision.action, "execute")
+        self.assertEqual(decision.query, "我有鸭蛋，想做菜")
+
     def test_suspicious_typo_asks_for_confirmation(self):
         decision = decide_clarification("我想做十豆炖鸡，需要准备哪些调味料和配菜?")
         self.assertEqual(decision.action, "ask")

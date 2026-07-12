@@ -84,6 +84,7 @@ miniCookingAgent-Demo/
 │   ├── recepi/                             # 实体/关系/属性配置文件
 │   ├── recipe_aliases.json                 # 菜名同义词典
 │   ├── recommendation_aliases.json         # 推荐场景别名表
+│   ├── entity_ambiguities.json             # 需要用户确认的泛称实体
 │   └── reverse_entity_aliases.json         # 反向查询实体归并配置
 ├── frontend/
 │   ├── src/

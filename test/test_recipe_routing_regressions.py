@@ -77,6 +77,35 @@ def test_generic_meat_term_is_not_silently_resolved_to_one_species():
     assert resolved.ingredients[-1].match_mode == "ambiguous"
 
 
+def test_generic_egg_term_is_not_silently_resolved_to_chicken_egg():
+    frame = QueryFrame(
+        intent="ingredient_combo_query",
+        source_text="我有蛋，可以做什么",
+        ingredients=[EntitySlot(raw="蛋")],
+        confidence=0.95,
+    )
+    resolved = resolve(
+        frame,
+        entity_names={"Ingredient": {"鸡蛋", "鸭蛋"}},
+    )
+
+    assert resolved.ingredients[-1].canonical is None
+    assert resolved.ingredients[-1].match_mode == "ambiguous"
+
+
+def test_generic_egg_term_asks_chicken_or_duck_egg():
+    frame = QueryFrame(
+        intent="ambiguous_query",
+        source_text="蛋",
+        ingredients=[EntitySlot(raw="蛋", match_mode="ambiguous")],
+        confidence=0.95,
+    )
+    action = query_router._action_from_frame(frame)
+
+    assert action.action == "content"
+    assert "鸡蛋还是鸭蛋" in (action.content or "")
+
+
 def test_pork_family_alias_does_not_choose_pork_floss():
     frame = QueryFrame(
         intent="ingredient_combo_query",

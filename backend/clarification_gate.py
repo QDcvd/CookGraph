@@ -256,16 +256,22 @@ def resolve_pending_clarification(user_text: str, pending: dict | None) -> Clari
 
     if pending_type == "ambiguous_ingredient":
         original = str(payload.get("original_query") or "").strip()
+        ambiguous = [str(item).strip() for item in payload.get("ambiguous", []) if str(item).strip()]
         candidate_terms = [
             str(item).strip()
             for item in payload.get("candidate_terms", [])
             if str(item).strip()
         ]
         if original and text and not _is_negative(text) and any(term in text for term in candidate_terms):
+            resolved_query = original
+            selected = next((term for term in candidate_terms if term in text), "")
+            for ambiguous_name in ambiguous:
+                if selected and ambiguous_name in resolved_query:
+                    resolved_query = resolved_query.replace(ambiguous_name, selected, 1)
             return ClarificationDecision(
                 action="execute",
                 tool_name="recipe_query_tool",
-                query=f"{original}；补充说明：{user_text}",
+                query=resolved_query or f"{original}；补充说明：{user_text}",
                 reason="用户补充了泛称食材的具体类别",
             )
 

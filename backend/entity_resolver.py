@@ -17,10 +17,32 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ALIAS_PATH = ROOT / "config" / "recipe_aliases.json"
 RECOMMENDATION_ALIAS_PATH = ROOT / "config" / "recommendation_aliases.json"
 REVERSE_ALIAS_PATH = ROOT / "config" / "reverse_entity_aliases.json"
+AMBIGUITY_CONFIG_PATH = ROOT / "config" / "entity_ambiguities.json"
 FUZZY_THRESHOLD = 0.6
 DISH_FUZZY_THRESHOLD = 0.85
 DISH_CONNECTOR_CHARS = "炒烧炖煮蒸炸烤煎拌焖熘煲烩烙"
-GENERIC_AMBIGUOUS_INGREDIENTS = {"肉"}
+
+
+def _load_ambiguous_entities() -> dict[str, list[str]]:
+    """Load generic entities that require user disambiguation."""
+    if not AMBIGUITY_CONFIG_PATH.is_file():
+        return {}
+    try:
+        payload = json.loads(AMBIGUITY_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    ingredient_map = payload.get("Ingredient", {}) if isinstance(payload, dict) else {}
+    if not isinstance(ingredient_map, dict):
+        return {}
+    return {
+        str(raw): [str(item) for item in choices if str(item).strip()]
+        for raw, choices in ingredient_map.items()
+        if isinstance(choices, list)
+    }
+
+
+def ambiguous_entity_candidates(raw: str) -> list[str]:
+    return _load_ambiguous_entities().get(str(raw or "").strip(), [])
 
 
 def _load_aliases() -> dict[str, list[str]]:
@@ -160,6 +182,12 @@ def _resolve_single(
             slot.confidence = 1.0
             return slot
 
+    # 配置声明的泛称优先进入澄清流程，不能被“蛋 -> 鸡蛋”这类别名直接吞掉。
+    if ambiguous_entity_candidates(raw) and not (allowed_types == {"Dish"}):
+        slot.match_mode = "ambiguous"
+        slot.confidence = 0.0
+        return slot
+
     # 2. 别名匹配
     if raw in rev_alias:
         canonical = rev_alias[raw]
@@ -205,12 +233,6 @@ def _resolve_single(
                 slot.match_mode = "normalized"
                 slot.confidence = 0.92 if variant != raw else 1.0
                 return slot
-
-    # 泛称不能凭模糊相似度擅自选择一个具体肉类。
-    if raw.strip() in GENERIC_AMBIGUOUS_INGREDIENTS and not is_dish_only:
-        slot.match_mode = "ambiguous"
-        slot.confidence = 0.0
-        return slot
 
     # 4. 模糊匹配
     best_type = None
