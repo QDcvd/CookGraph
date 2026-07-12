@@ -57,7 +57,7 @@ flowchart TD
 - `attribute`
 - `followup` 上下文状态
 
-模型连接失败、JSON 非法或置信度不足时，只返回 `ambiguous_query` 并澄清，不恢复旧的语义正则兜底。
+模型连接失败、JSON 非法或置信度不足时，只返回 `ambiguous_query` 并澄清，不恢复旧的语义正则兜底。后处理合同会校验槽位之间的一致性，例如“明确菜名 + attribute=ingredients”必须进入菜品详情查询，而不是食材推荐或歧义澄清。
 
 上下文追问的处理方式是：
 
@@ -147,6 +147,14 @@ plan.field = fire
 plan.field = prep
     -> prep_process
 
+plan.field = ingredients
+    -> show_ingredients=true
+    -> 输出主要食材 / 配料 / 调味品
+
+plan.field = full_recipe
+    -> show_all=true
+    -> 输出用料 / 做法 / 火力和时间
+
 plan.intent = ingredient_combo_query
     -> 推荐向量
 ```
@@ -157,7 +165,7 @@ plan.intent = ingredient_combo_query
 单道菜谱查询 + 本地图谱未命中 + web_fallback_allowed=true
 ```
 
-反向查询、图谱统计和推荐无结果时，默认返回本地图谱未命中，不自动联网替代本地事实。
+反向查询、图谱统计和推荐无结果时，默认返回本地图谱未命中，不自动联网替代本地事实。完整菜谱和食材清单也在这一层生成用户可读文本，内部 `cook_id`、关系类型和结构化摘要不会直接展示给用户。
 
 ## 5. 工具循环与上下文预算
 
@@ -201,4 +209,6 @@ conda run -n bigdog python -m pytest -q
 - ToolResult JSON 协议
 - 单菜未命中联网降级
 - 推荐和关系向量由 plan 驱动
-- 25 个多轮会话 + 40 条单轮问题的回放测试
+- 当前 pytest 回归测试（93 项）
+- `replay_session.py` 的真实数据库多轮回放
+- 召回率和多轮行为专项测试脚本

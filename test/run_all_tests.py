@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""全量测试入口 — 依次运行所有测试项目，汇总生成 test_report.md。
+"""全量测试入口 — 运行单元回归与专项测试，汇总生成报告。
 
 用法：
     PYTHONIOENCODING=utf-8 python test/run_all_tests.py
 
 输出：
-    test/test_report.md  — 统一汇总报告
+    test/.artifacts/test_report.md  — 统一汇总报告
 """
 
 import importlib.util
@@ -177,30 +177,7 @@ def _extract_summary(label: str, text: str, rc: int) -> str:
 
 def run_all():
     tests = [
-        dict(
-            label="基础单元测试（全量）",
-            cmd=[
-                PYTHON,
-                "-m",
-                "unittest",
-                "test.test_query_understanding",
-                "test.test_recipe_query_adapter_guardrails",
-                "test.test_tool_routing_guardrails",
-                "test.test_grounded_recipe_answer",
-                "test.test_token_usage_tracker",
-            ],
-            timeout=180,
-        ),
-        dict(
-            label="持久化测试",
-            cmd=[PYTHON, "test/test_chat_persistence.py"],
-            timeout=120,
-        ),
-        dict(
-            label="Zleap-lite 记忆测试",
-            cmd=[PYTHON, "test/test_zleap_lite_memory.py"],
-            timeout=120,
-        ),
+        dict(label="Pytest 单元回归（全量）", cmd=[PYTHON, "-m", "pytest", "-q"], timeout=240),
         dict(
             label="单轮召回率测试（全量）",
             cmd=[PYTHON, "test/run_recall_test.py", "--phase", "all"],

@@ -9,7 +9,7 @@
     # 第二阶段（扩展 50 条）
     PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase 2
 
-    # 全量 100 条
+    # 全量 150 条
     PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase all
 
 输出：

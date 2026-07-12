@@ -1,3 +1,7 @@
+# 历史方案说明
+
+> 本文记录早期 Query Understanding 设计，当前实现已经采用 `QueryFrame -> plan` V2 链路。文中的 `QueryIntent`、`execute_reverse_query` 和旧 parser 仅供查阅，不作为当前施工依据。
+
 # Query Understanding 重构方案
 
 ## 背景
