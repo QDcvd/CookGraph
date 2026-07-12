@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""复刻数据库第一个 session 的所有对话，观察新架构下的表现。
+"""复刻数据库最新 session 的多轮用户对话，观察当前 agent 真实表现。
 """
-import asyncio, os, sys, threading, socketserver, select, urllib.request
+import argparse, asyncio, json, os, sqlite3, sys, threading, socketserver, select, urllib.request
+from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+DEFAULT_DB_PATH = ROOT / "data" / "memory.sqlite3"
+DEFAULT_OUTPUT_PATH = ROOT / "test" / ".artifacts" / "latest_session_replay_result.json"
 
 def load_project_env() -> dict:
     env = os.environ.copy()
@@ -93,32 +95,115 @@ def start_tunnel(env):
     t = threading.Thread(target=svr.serve_forever, daemon=True); t.start()
     return svr, c
 
-# ── 复刻对话 ──
-questions = [
-    "猪肉可以用来做什么",
-    "锅包肉怎么做",
-    "火力如何",
-    "锅包肉的火力要怎么样",
-    "沙拉怎么做",
-    "牛肉可以用来做什么菜",
-    "鱼可以做什么菜",
-    "年糕可以做什么菜",
-    "牛肉可以坐什么菜",
-    "牛肉可以用来做什么菜",
-    "猪肉可以用来做什么",
-    "清蒸牛肉怎么做",
-    "那这道菜的火力要怎么样",
-    "我只要知道火力是多少",
-    "我只要知道小炒黄牛肉火力是多少",
-]
+# ── 从 SQLite 读取最新 session ──
+def _connect(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def latest_session_id(db_path: Path) -> str:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT id, title, updated_at
+            FROM chat_sessions
+            WHERE status = 'active'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(f"没有找到 active session：{db_path}")
+    return str(row["id"])
+
+def load_session_messages(db_path: Path, session_id: str) -> tuple[dict, list[dict]]:
+    with _connect(db_path) as conn:
+        session = conn.execute(
+            "SELECT id, title, updated_at FROM chat_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if session is None:
+            raise RuntimeError(f"session 不存在：{session_id}")
+        rows = conn.execute(
+            """
+            SELECT role, content, rag_trace_json, created_at
+            FROM chat_messages
+            WHERE session_id = ? AND deleted_at IS NULL
+            ORDER BY created_at
+            """,
+            (session_id,),
+        ).fetchall()
+    messages = []
+    for row in rows:
+        trace = None
+        if row["rag_trace_json"]:
+            try:
+                trace = json.loads(row["rag_trace_json"])
+            except json.JSONDecodeError:
+                trace = None
+        messages.append({
+            "role": str(row["role"]),
+            "content": str(row["content"] or ""),
+            "rag_trace": trace,
+            "created_at": str(row["created_at"] or ""),
+        })
+    return dict(session), messages
+
+def extract_user_questions(messages: list[dict]) -> list[str]:
+    return [
+        item["content"]
+        for item in messages
+        if item.get("role") in {"human", "user"} and str(item.get("content") or "").strip()
+    ]
+
+def trace_tool_summary(trace: dict | None) -> list[dict]:
+    if not isinstance(trace, dict):
+        return []
+    result = []
+    for call in trace.get("tool_calls", []) or []:
+        result.append({
+            "tool_name": call.get("tool_name"),
+            "args": call.get("args"),
+            "preview": call.get("output_preview") or call.get("content", "")[:500],
+        })
+    return result
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="复刻 SQLite 最新 session 的多轮用户对话。")
+    parser.add_argument("--session-id", help="指定 session_id；默认取最新 active session")
+    parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite 数据库路径")
+    parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH), help="JSON 结果输出路径")
+    parser.add_argument("--max-turns", type=int, default=0, help="最多复放多少轮用户消息；0 表示全部")
+    return parser.parse_args()
 
 async def main():
+    args = parse_args()
+    db_path = Path(args.db).resolve()
+    session_id = args.session_id or latest_session_id(db_path)
+    session, stored_messages = load_session_messages(db_path, session_id)
+    questions = extract_user_questions(stored_messages)
+    if args.max_turns > 0:
+        questions = questions[: args.max_turns]
+
     tunnel = start_tunnel(os.environ)
     history = []
     print(f"{'='*60}")
-    print(f"  复刻第一个 session 对话（{len(questions)} 轮）")
+    print(f"  复刻最新 session 多轮用户对话")
+    print(f"  session_id: {session_id}")
+    print(f"  title: {session.get('title')}")
+    print(f"  updated_at: {session.get('updated_at')}")
+    print(f"  用户轮次: {len(questions)}")
     print(f"  LLM: {os.environ.get('LLM_MODEL','?')}")
     print(f"{'='*60}")
+
+    replay_records = {
+        "session_id": session_id,
+        "session_title": session.get("title"),
+        "source_updated_at": session.get("updated_at"),
+        "replayed_at": datetime.now().isoformat(),
+        "llm_model": os.environ.get("LLM_MODEL", ""),
+        "turns": [],
+    }
 
     try:
         for i, q in enumerate(questions):
@@ -128,8 +213,10 @@ async def main():
 
             full = ""
             trace = None
+            raw_events = []
             try:
                 async for ev in stream_search_agent(q, history):
+                    raw_events.append(ev)
                     if ev.get("type") == "content":
                         full += ev.get("content","")
                     elif ev.get("type") == "trace":
@@ -139,21 +226,30 @@ async def main():
                 continue
 
             print(f"[回答]: {full[:500]}")
-            if trace:
-                calls = trace.get("tool_calls",[])
-                if calls:
-                    for tc in calls:
-                        print(f"  → tool: {tc.get('tool_name','')}({tc.get('args',{})})")
+            tool_summary = trace_tool_summary(trace)
+            for tc in tool_summary:
+                print(f"  → tool: {tc.get('tool_name','')}({tc.get('args',{})})")
             print(f"  [{len(full)} chars]")
 
+            replay_records["turns"].append({
+                "turn": i + 1,
+                "user": q,
+                "assistant": full,
+                "tool_calls": tool_summary,
+                "trace": trace,
+                "raw_event_types": [ev.get("type") for ev in raw_events],
+            })
             history.append({"role":"user","content":q})
             history.append({"role":"assistant","content":full,"rag_trace":trace})
     finally:
         if tunnel:
             tunnel[0].shutdown(); tunnel[0].server_close(); tunnel[1].close()
 
-    if tunnel:
-        tunnel[0].shutdown(); tunnel[0].server_close(); tunnel[1].close()
+    output_path = Path(args.output).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(replay_records, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n[输出] {output_path}")
     print(f"\n{'='*60}  复刻完成")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

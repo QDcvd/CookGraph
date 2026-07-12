@@ -13,7 +13,8 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from backend.recipe_query_adapter import query_recipe_kg
+from backend.recipe_query_adapter import query_recipe_plan
+from backend.tool_result import error_result, make_tool_result
 
 # 搜索时跳过的目录
 EXCLUDED_DIRS = {
@@ -155,7 +156,7 @@ def read_file_tool(path: str) -> str:
 
 
 @tool
-def web_search_tool(query: str) -> str:
+def web_search_tool(query: str) -> dict:
     """联网搜索公开网页信息。query 应是搜索关键词或问题，不要传本地路径或文件名通配符。
 
     使用规则：
@@ -167,12 +168,26 @@ def web_search_tool(query: str) -> str:
     try:
         from ddgs import DDGS
     except ImportError:
-        return "网络搜索失败：缺少 ddgs 包。请运行 pip install ddgs。"
+        return error_result(
+            tool="web_search_tool",
+            query_type="web_search",
+            code="DEPENDENCY_MISSING",
+            message="网络搜索暂不可用：缺少 ddgs 包。",
+            detail="请安装 ddgs 后重试。",
+            source="public_web",
+        )
 
     try:
         results = list(DDGS(timeout=15).text(query, max_results=5))
     except Exception as e:
-        return f"网络搜索失败：{type(e).__name__}: {e}"[:MAX_RETURN_CHARS]
+        return error_result(
+            tool="web_search_tool",
+            query_type="web_search",
+            code="SEARCH_FAILED",
+            message="网络搜索失败，请稍后重试。",
+            detail=f"{type(e).__name__}: {e}",
+            source="public_web",
+        )
 
     clean_results = []
     for item in results:
@@ -183,61 +198,76 @@ def web_search_tool(query: str) -> str:
             clean_results.append((title, url, body))
 
     if not clean_results:
-        return "网络搜索没有返回内容。"
+        return make_tool_result(
+            tool="web_search_tool",
+            query_type="web_search",
+            ok=False,
+            source="public_web",
+            message="网络搜索没有返回内容。",
+            meta={"query": query},
+        )
 
-    lines = [f"搜索结果：{query}"]
-    for index, (title, url, body) in enumerate(clean_results, start=1):
-        lines.append(f"{index}. {title or '无标题'}")
-        if url:
-            lines.append(f"链接：{url}")
-        if body:
-            lines.append(f"摘要：{body}")
-    return "\n".join(lines)[:MAX_RETURN_CHARS]
+    search_results = [
+        {"title": title, "url": url, "snippet": body}
+        for title, url, body in clean_results
+    ]
+    return make_tool_result(
+        tool="web_search_tool",
+        query_type="web_search",
+        ok=True,
+        source="public_web",
+        data={"query": query, "results": search_results},
+        message=f"已找到 {len(search_results)} 条网页结果。",
+        meta={"result_count": len(search_results)},
+    )
 
 
 @tool
-def recipe_query_tool(query: str) -> str:
-    """查询本地菜谱知识图谱。query 传用户的自然语言问题即可。
+def recipe_query_tool(plan: dict) -> dict:
+    """查询本地菜谱知识图谱。plan 传结构化查询参数，不要传自然语言。
 
-    ===== 必须使用此工具的时机 =====
-    - 用户询问某道菜的"做法""怎么做""如何做""步骤""具体做法""烹饪方法"
-    - 用户询问某道菜的"配料""食材""调料""用料""需要什么材料"
-    - 用户询问某道菜的"火候""火力""火力调节""怎么控制火候"
-    - 用户询问某道菜的"备菜""备菜过程""提前准备什么"
-    - 用户询问某道菜的"下锅顺序""下锅步骤""烹饪过程"
-    - 用户询问"哪些菜用了某食材""哪些菜是某口味""有什么菜推荐"
-    - 用户直接说出菜名（如"清蒸鲈鱼""小炒鸡"等具体菜名）
-    - 用户说"想吃某道菜""介绍一下某道菜"
-    - 用户说的菜名即使不在本地图谱中，也应先用此工具查询
+    以下是支持的计划结构。你只能在下方列出的结构中选择，不能自己发明格式。
 
-    ===== 指代追问——必须补全菜名 =====
-    当用户用"它""这道菜""刚才那道菜""这个火候""这个菜"等指代词追问时，
-    **必须在 query 中补全历史对话中最近提到的菜名**，不能只传指代词。
-    如果 query 中只有指代词而没有具体菜名，图谱会查不到。
+    ===== 模式1: dish — 查某道菜的做法/属性/完整档案 =====
+    {{"intent": "dish_detail_query", "mode": "dish", "dish": "菜名",
+      "field": "属性名（可选）", "show_all": true（可选）}}
 
-    正确示例：
-    上一轮说了"某菜怎么做"，用户接着问"它的火力是怎么样"
-    → query 应包含菜名（如"某菜的火力"或"某菜火力是怎么样"）
+    field 可选值：full_recipe, method, prep, cooking_process, fire, tips,
+    ingredients, seasonings, techniques, existence, count, cooking_method,
+    prep_process, cooking_tips, fire_control_process。
 
-    上一轮说了"某菜怎么做"，用户接着问"调料是什么样"
-    → query 应包含菜名（如"某菜的调料"或"某菜需要什么调料"）
+    示例：
+    查"小炒黄牛肉"的做法 → {{"intent": "dish_detail_query", "mode": "dish", "dish": "小炒黄牛肉", "field": "cooking_process"}}
+    查"清蒸鲈鱼"完整档案 → {{"intent": "dish_detail_query", "mode": "dish", "dish": "清蒸鲈鱼", "show_all": true}}
 
-    错误示例：
-    用户问"它的火力是怎么样" → query="它的火力是怎么样" ❌ 不含菜名
-    用户问"调料是什么样" → query="调料是什么样" ❌ 不含菜名
+    ===== 模式2: combo — 组合条件查询 =====
+    {{"intent": "ingredient_combo_query", "mode": "combo",
+      "ingredients": ["食材1", "食材2"], "technique": "技法", "taste": "味道",
+      "cuisine": "菜系", "exclude": ["排除项"]}}
 
-    Notice! 如果 query 中缺少必要的菜名信息，无法确定要查询哪道菜时，
-    必须在 Final Answer 中向用户追问清楚具体菜名，停止进行任何其他操作。
+    示例：
+    哪些菜用了牛肉 → {{"intent": "reverse_entity_query", "mode": "combo", "ingredients": ["牛肉"]}}
+    牛肉配芥兰做什么 → {{"intent": "ingredient_combo_query", "mode": "combo", "ingredients": ["牛肉", "芥蓝"]}}
 
-    ===== 新菜名覆盖 =====
-    - 如果用户提到一个**新的菜名**（如先问某菜，然后问另一道新菜），
-      应以新菜名作为查询重点，不要沿用旧菜名。
+    ===== 模式3: missing — 缺失食材查询 =====
+    {{"intent": "missing_ingredients_query", "mode": "missing",
+      "dish": "菜名", "ingredients": ["已有食材1", "已有食材2"]}}
 
-    ===== 不需要调用此工具的场景 =====
-    - 用户只是打招呼、问天气、问模型身份等非菜谱问题
-    - 用户明确要求联网搜索、搜索最新信息
+    ===== 通用规则 =====
+    1. dish 字段必须填图谱标准菜名，不要填用户原话。
+    2. 不要把不存在的字段塞进 plan。
+    3. 如果 plan 结构不被支持，返回错误，不要自己重新解释成自然语言。
     """
-    return query_recipe_kg(query)
+    if not isinstance(plan, dict):
+        return error_result(
+            tool="recipe_query_tool",
+            query_type="invalid_plan",
+            code="PLAN_NOT_OBJECT",
+            message="菜谱查询参数无效：plan 必须是对象。",
+            detail=f"收到 {type(plan).__name__}",
+            source="local_kg",
+        )
+    return query_recipe_plan(plan)
 
 
 def _get_tools() -> list[Any]:

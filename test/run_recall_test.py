@@ -13,8 +13,8 @@
     PYTHONIOENCODING=utf-8 python test/run_recall_test.py --phase all
 
 输出：
-    test/test_results.json     — 每条用例的详细结果
-    test/test_report.md        — 人类可读的测试报告
+    test/.artifacts/test_results.json     — 每条用例的详细结果
+    test/.artifacts/test_report.md        — 人类可读的测试报告
 """
 
 import json
@@ -33,11 +33,22 @@ sys.path.insert(0, str(ROOT))
 from test.recipe_test_data import TEST_CASES
 from backend.agent_adapter_local_LLM_harness import _recipe_query_needs_web_fallback
 from backend.agent_tools import web_search_tool
-from backend.recipe_query_adapter import query_recipe_kg
+from backend.query_router import route_query
+from backend.recipe_query_adapter import query_recipe_plan
+from backend.tool_result import serialize_tool_result
+
+
+def run_local_plan(input_text: str) -> str:
+    """通过真实 V2 路由执行一条召回用例。"""
+    action = route_query(input_text, [])
+    if action.action != "tool" or action.tool_name != "recipe_query_tool" or not isinstance(action.plan, dict):
+        return ""
+    return serialize_tool_result(query_recipe_plan(action.plan))
 
 
 # ── 配置 ──
-RESULT_DIR = ROOT / "test"
+RESULT_DIR = ROOT / "test" / ".artifacts"
+RESULT_DIR.mkdir(parents=True, exist_ok=True)
 JSON_OUTPUT = RESULT_DIR / "test_results.json"
 REPORT_OUTPUT = RESULT_DIR / "test_report.md"
 
@@ -169,7 +180,7 @@ def run_web_fallback_case(case: dict) -> dict:
     start = time.time()
 
     try:
-        local_output = query_recipe_kg(input_text)
+        local_output = run_local_plan(input_text)
         fallback_needed = _recipe_query_needs_web_fallback(local_output)
         web_output = ""
         web_ok = False
@@ -240,7 +251,7 @@ def run_single_case(case: dict) -> dict:
 
     start = time.time()
     try:
-        output = query_recipe_kg(input_text)
+        output = run_local_plan(input_text)
     except Exception as e:
         elapsed = time.time() - start
         return dict(

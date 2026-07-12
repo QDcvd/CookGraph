@@ -404,3 +404,6 @@ cd ..
 - 菜谱查询工具的调用链是什么。
 - 跑了哪些验证命令，结果如何。
 - 如果有失败项，说明失败原因和下一步建议。
+# 历史文档：当前实现已迁移到 V2 参数化工具链
+
+> 本文仅保留历史施工记录，禁止按其中的 `query_recipe_kg(query)`、旧文本协议或旧文件路径执行。当前入口请以 [README.md](../README.md) 和 [USER_MESSAGE_CALL_CHAIN.md](USER_MESSAGE_CALL_CHAIN.md) 为准。

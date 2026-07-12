@@ -12,9 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.agent_tools import _extract_paths_from_tool_text, _get_tools
+from backend.tool_result import parse_tool_result, serialize_tool_result
 
-# LLM 意图识别层，用于判断指代追问
-from backend.query_understanding import classify_intent
 
 TOOL_NAME_ALIASES = {
     "recipe_query": "recipe_query_tool",
@@ -42,7 +41,9 @@ def _message_content_to_text(content: Any) -> str:
             elif isinstance(block, dict) and block.get("type") == "text":
                 text += block.get("text", "")
         return text
-    return ""
+    if isinstance(content, dict):
+        return serialize_tool_result(content)
+    return str(content or "")
 
 
 # ---------------------------------------------------------------------------
@@ -191,61 +192,6 @@ def _query_source_for_repair(current_user_text: str | None, history: list[dict] 
     return user_text or None
 
 
-def _build_recipe_context_from_history(history: list[dict] | None) -> dict | None:
-    """从 history 中提取最近一轮对话，以纯文本形式提供给 classify_intent。
-
-    让 LLM 自己判断上下文中的菜名和指代关系，不用正则提取。
-    """
-    if not history or len(history) < 1:
-        return None
-
-    # 取最近一轮 user + assistant 的原文
-    last_user: str | None = None
-    last_assistant: str | None = None
-
-    for item in reversed(history):
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "")
-        content = str(item.get("content") or "")
-
-        if role == "user" and last_user is None:
-            last_user = content
-        elif role in ("assistant", "ai") and last_assistant is None:
-            last_assistant = content
-
-        if last_user is not None and last_assistant is not None:
-            break
-
-    if last_user is None and last_assistant is None:
-        return None
-
-    ctx: dict[str, str] = {}
-    if last_user:
-        ctx["last_query"] = last_user[:200]
-    if last_assistant:
-        # 取回答开头（包含了菜名信息）即可
-        ctx["last_answer_head"] = last_assistant[:300]
-
-    return ctx if ctx else None
-
-
-def _resolve_followup_via_intent_classifier(query: str, history: list[dict] | None) -> str:
-    """通过 LLM 意图分类器判断 query 是否是指代追问，若是则返回补全后的查询。
-
-    不依赖正则提取菜名，直接把最近一轮对话原文喂给 LLM，
-    让意图识别层自己判断上下文关联。
-    """
-    recipe_ctx = _build_recipe_context_from_history(history)
-    if not recipe_ctx:
-        return query
-
-    intent = classify_intent(query, recipe_context=recipe_ctx)
-
-    if intent.intent == "recipe_followup_query" and intent.resolved_query:
-        return intent.resolved_query
-
-    return query
 def _normalize_tool_call_args(
     tool_name: str,
     args: dict,
@@ -264,6 +210,15 @@ def _normalize_tool_call_args(
         return args, None
 
     normalized = dict(args or {})
+    if tool_name == "recipe_query_tool":
+        plan = normalized.get("plan")
+        if isinstance(plan, dict):
+            return {"plan": plan}, None
+        return normalized, (
+            "工具参数无效：recipe_query_tool 只接受结构化 plan，"
+            "不能传 query 或自然语言。请先通过 query_router 生成 plan。"
+        )
+
     raw_query = normalized.get("query")
     repair_source = _query_source_for_repair(current_user_text, history)
 
@@ -281,16 +236,6 @@ def _normalize_tool_call_args(
         return normalized, "工具参数无效：用户只是确认/同意，但当前上下文里没有可恢复的原始问题。"
 
     normalized["query"] = str(raw_query).strip()
-
-    # ── 指代追问：通过 LLM 意图识别层判断 ──
-    # 把 query 和 history 中的上下文交给 classify_intent，让 LLM 自己决定
-    # 是否需要补全菜名。如果 LLM 认为是指代追问，resolved_query 会包含
-    # 补全后的完整查询。
-    if tool_name == "recipe_query_tool":
-        resolved = _resolve_followup_via_intent_classifier(normalized["query"], history)
-        if resolved != normalized["query"]:
-            print(f"  [QU 意图识别] query 改写: \"{normalized['query']}\" → \"{resolved}\"", flush=True)
-            normalized["query"] = resolved
 
     return normalized, None
 
@@ -417,133 +362,23 @@ def _parse_textual_tool_call(raw_text: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 通用工具路由器的响应解析
-# ---------------------------------------------------------------------------
-
-def _parse_missing_tool_router_response(raw_text: str) -> dict | None:
-    """解析通用工具路由器返回的 JSON，提取工具名和参数。"""
-    text = raw_text.strip()
-    if not text:
-        return None
-
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
-    else:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if match:
-            text = match.group(0)
-
-    try:
-        data = json.loads(text)
-    except Exception:
-        return None
-
-    if not isinstance(data, dict):
-        return None
-    tool_name = data.get("tool_name")
-    if tool_name is None or str(tool_name).strip().lower() in {"", "null", "none", "no_tool"}:
-        return None
-
-    available = {getattr(item, "name", getattr(item, "__name__", "")) for item in _get_tools()}
-    tool_name = _normalize_tool_name(str(tool_name).strip())
-    if tool_name not in available:
-        return None
-
-    args = data.get("args")
-    if not isinstance(args, dict):
-        args = {}
-    return {"name": tool_name, "args": args}
-
-
-# ---------------------------------------------------------------------------
 # Trace 记录
 # ---------------------------------------------------------------------------
-
-def _first_regex_group(pattern: str, text: str) -> str | None:
-    match = re.search(pattern, text, flags=re.DOTALL)
-    if not match:
-        return None
-    return match.group(1).strip()
-
-
-def _parse_float(value: str | None) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
-def _parse_semantic_candidates(text: str) -> list[dict[str, Any]]:
-    candidates_text = _first_regex_group(r"候选：(.+?)(?:；(?:alias|$)|$)", text)
-    if not candidates_text:
-        return []
-    candidates = []
-    for name, score in re.findall(r"([^；,，()（）]+)[(（]([0-9.]+)[)）]", candidates_text):
-        candidates.append({"name": name.strip(), "score": _parse_float(score)})
-    return candidates
-
-
-def _parse_recipe_hybrid_retrieval(content: str) -> dict[str, Any] | None:
-    """Parse the semantic retrieval summary appended by recipe_query_tool."""
-    marker = "语义召回摘要："
-    if marker not in content:
-        return None
-
-    summary = content.split(marker, 1)[1].strip()
-    if not summary:
-        return None
-
-    accepted = "混合召回改写：" in summary
-    skipped = "混合召回跳过：" in summary
-    not_rewritten = "混合召回未改写：" in summary
-    payload: dict[str, Any] = {
-        "strategy": "alias + lexical + dense + rrf",
-        "accepted": accepted,
-        "skipped": skipped,
-        "not_rewritten": not_rewritten,
-        "summary": summary[:1000],
-        "candidates": _parse_semantic_candidates(summary),
-    }
-
-    fields = {
-        "original_query": r"原问题=(.+?)；",
-        "standard_dish": r"标准菜名=(.+?)；",
-        "matched_text": r"命中文本=(.+?)；",
-        "rewritten_query": r"改写查询=(.+?)；",
-        "top": r"top=(.+?)\s+score=",
-        "score": r"score=([0-9.]+)",
-        "margin": r"margin=([0-9.]+)",
-        "alias_debug": r"alias=\[(.*?)\]\s+lexical=",
-        "lexical_debug": r"lexical=\[(.*?)\]\s+dense=",
-        "dense_debug": r"dense=\[(.*?)\]\s*$",
-    }
-    for key, pattern in fields.items():
-        value = _first_regex_group(pattern, summary)
-        if key in {"score", "margin"}:
-            payload[key] = _parse_float(value)
-        elif value is not None:
-            payload[key] = value
-
-    if accepted and "standard_dish" not in payload and "top" in payload:
-        payload["standard_dish"] = payload["top"]
-
-    return payload
 
 
 def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, content: str) -> None:
     """将工具执行结果记录到 trace 中。"""
+    parsed_result = parse_tool_result(content)
     trace["tool_used"] = True
     trace["tool_name"] = tool_name
-    trace["tool_calls"].append(
-        {
-            "tool_name": tool_name,
-            "args": args,
-            "output_preview": content[:800],
-        }
-    )
+    call_record = {
+        "tool_name": tool_name,
+        "args": args,
+        "output_preview": content[:800],
+    }
+    if parsed_result is not None:
+        call_record["result"] = parsed_result
+    trace["tool_calls"].append(call_record)
 
     if tool_name == "find_tool":
         path = str(args.get("path", "."))
@@ -575,12 +410,14 @@ def _append_tool_result_to_trace(trace: dict, tool_name: str, args: dict, conten
             }
         )
     elif tool_name == "recipe_query_tool":
-        hybrid_retrieval = _parse_recipe_hybrid_retrieval(content)
-        if hybrid_retrieval:
-            trace["hybrid_retrieval"] = hybrid_retrieval
-            trace["retrieval_mode"] = "hybrid_recipe_kg"
-            trace["retrieval_pipeline"] = "alias + char_ngram_tfidf + gte-large-zh + rrf + knowledge_graph"
-            trace["retrieval_top_k"] = len(hybrid_retrieval.get("candidates") or [])
+        result_meta = parsed_result.get("meta") if isinstance(parsed_result, dict) else None
+        if isinstance(result_meta, dict):
+            if result_meta.get("retrieval_mode"):
+                trace["retrieval_mode"] = result_meta["retrieval_mode"]
+            if result_meta.get("retrieval_pipeline"):
+                trace["retrieval_pipeline"] = result_meta["retrieval_pipeline"]
+            if result_meta.get("retrieval_top_k") is not None:
+                trace["retrieval_top_k"] = result_meta["retrieval_top_k"]
         trace["retrieved_chunks"].append(
             {
                 "filename": "recipe_query_tool",
@@ -599,7 +436,7 @@ async def _execute_tool_call(
     current_user_text: str | None = None,
     history: list[dict] | None = None,
 ) -> tuple[str, dict, str]:
-    """执行一次工具调用，返回（工具名、参数、结果文本）。"""
+    """执行一次工具调用，返回（工具名、参数、发送给模型的结果 JSON 文本）。"""
     tool_name = _tool_call_name(call)
     args = _tool_call_args(call)
     args, validation_error = _normalize_tool_call_args(

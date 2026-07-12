@@ -254,6 +254,21 @@ def resolve_pending_clarification(user_text: str, pending: dict | None) -> Clari
                     reason="用户从反向查询候选中选择了具体菜",
                 )
 
+    if pending_type == "ambiguous_ingredient":
+        original = str(payload.get("original_query") or "").strip()
+        candidate_terms = [
+            str(item).strip()
+            for item in payload.get("candidate_terms", [])
+            if str(item).strip()
+        ]
+        if original and text and not _is_negative(text) and any(term in text for term in candidate_terms):
+            return ClarificationDecision(
+                action="execute",
+                tool_name="recipe_query_tool",
+                query=f"{original}；补充说明：{user_text}",
+                reason="用户补充了泛称食材的具体类别",
+            )
+
     return None
 
 

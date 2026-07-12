@@ -5,6 +5,14 @@
         <div class="status-dot"></div>
         <span>迷你烹饪问答机器人已就绪</span>
       </div>
+      <div class="mobile-header-actions" aria-label="移动端快捷操作">
+        <button class="mobile-header-btn" type="button" title="开始新对话" @click="onMobileNewChat">
+          <i class="fas fa-plus"></i>
+        </button>
+        <button class="mobile-header-btn" type="button" title="问答记录" @click="onMobileHistory">
+          <i class="fas fa-clock-rotate-left"></i>
+        </button>
+      </div>
       <div class="header-mode">COOK MODE</div>
     </header>
 
@@ -33,11 +41,29 @@ import WelcomeScreen from './WelcomeScreen.vue';
 import MessageItem from './MessageItem.vue';
 import ChatInput from './ChatInput.vue';
 import { useChatStore } from '@/stores/chat';
+import { useSessionStore } from '@/stores/sessions';
 
 const chatStore = useChatStore();
+const sessionStore = useSessionStore();
 const chatContainerRef = ref<HTMLDivElement | null>(null);
 const messageItemRefs = ref<any[]>([]);
 const shouldAutoScroll = ref(true);
+
+const onMobileNewChat = () => {
+  chatStore.handleNewChat();
+};
+
+const onMobileHistory = async () => {
+  chatStore.activeNav = 'history';
+  sessionStore.showHistorySidebar = !sessionStore.showHistorySidebar;
+  if (sessionStore.showHistorySidebar) {
+    try {
+      await sessionStore.fetchSessions();
+    } catch (error: any) {
+      alert(error.message);
+    }
+  }
+};
 
 onBeforeUpdate(() => {
   messageItemRefs.value = [];

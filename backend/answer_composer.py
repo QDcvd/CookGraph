@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from backend.tool_result import parse_tool_result
+
 
 def compose_plan_result(result: dict[str, Any]) -> str:
     plan_type = result.get("plan_type")
@@ -18,6 +20,9 @@ def compose_plan_result(result: dict[str, Any]) -> str:
 
 def compose_web_recipe_answer(user_text: str, web_content: str) -> str:
     """Compress web search output into a concise recipe answer when possible."""
+    structured = parse_tool_result(web_content)
+    if structured is not None and structured.get("tool") == "web_search_tool":
+        return _compose_structured_web_recipe_answer(user_text, structured)
     if "网络搜索失败" in web_content or "网络搜索没有返回内容" in web_content:
         return (
             f"本地菜谱图谱没有收录“{user_text}”。我也尝试联网搜索了，但没有拿到足够可用的结果。\n"
@@ -63,6 +68,63 @@ def compose_web_recipe_answer(user_text: str, web_content: str) -> str:
         lines.append("做法：")
         lines.append("1. 联网结果里只找到零散描述，没有足够清晰的步骤；建议打开来源核对后再操作。")
 
+    source_lines = _format_source_links(sources[:2])
+    if source_lines:
+        lines.extend(["", "参考来源：", *source_lines])
+    return "\n".join(lines)
+
+
+def _compose_structured_web_recipe_answer(user_text: str, result: dict[str, Any]) -> str:
+    """Render structured web results without reparsing a text protocol."""
+    if not result.get("ok"):
+        return (
+            f"本地菜谱图谱没有收录“{user_text}”。我也尝试联网搜索了，但没有拿到足够可用的结果。\n"
+            "为了不误导你，我不会凭常识硬编做法。"
+        )
+
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    query = str(data.get("query") or user_text)
+    raw_sources = data.get("results") if isinstance(data.get("results"), list) else []
+    sources = [
+        {
+            "title": str(item.get("title") or ""),
+            "url": str(item.get("url") or ""),
+            "body": str(item.get("snippet") or ""),
+        }
+        for item in raw_sources
+        if isinstance(item, dict)
+    ]
+    sources = _filter_recipe_sources(user_text, sources, query)
+    usable_text = "\n".join(item["body"] for item in sources if item.get("body"))
+    best_steps = _best_source_steps(sources)
+    all_steps = _extract_numbered_steps(usable_text)
+    steps = best_steps if len(best_steps) >= 3 else (all_steps or best_steps)
+    ingredients = _extract_ingredients(usable_text)
+
+    if not steps and not ingredients:
+        source_lines = _format_source_links(sources[:2])
+        extra = "\n\n参考来源：\n" + "\n".join(source_lines) if source_lines else ""
+        return (
+            f"本地菜谱图谱没有收录“{user_text}”。我尝试联网搜索了，但结果里没有足够清晰的做法步骤。\n"
+            "你可以换个更常见的菜名，或者让我用“食材 + 做法方向”重新搜一次。"
+            f"{extra}"
+        )
+
+    title = f"本地菜谱图谱没有收录“{user_text}”。"
+    normalized_hint = _web_normalization_hint(user_text)
+    title += (
+        f"我按常见叫法“{normalized_hint}”联网整理了一版参考做法："
+        if normalized_hint
+        else "下面是根据联网搜索结果整理的参考做法："
+    )
+    lines = [title, ""]
+    if ingredients:
+        lines.extend(["用料：", *(f"- {item}" for item in ingredients[:8]), ""])
+    if steps:
+        lines.append("做法：")
+        lines.extend(f"{index}. {step}" for index, step in enumerate(steps[:6], start=1))
+    else:
+        lines.extend(["做法：", "1. 联网结果里只找到零散描述，没有足够清晰的步骤；建议打开来源核对后再操作。"])
     source_lines = _format_source_links(sources[:2])
     if source_lines:
         lines.extend(["", "参考来源：", *source_lines])

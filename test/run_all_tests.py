@@ -23,7 +23,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-REPORT_PATH = ROOT / "test" / "test_report.md"
+REPORT_PATH = ROOT / "test" / ".artifacts" / "test_report.md"
+REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 PYTHON = sys.executable
 ENV = os.environ.copy()

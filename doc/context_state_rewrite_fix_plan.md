@@ -132,3 +132,6 @@ decide_context_followup(
   - pending 一次性消费。
 - `python test/run_multiturn_dialogue_test.py --category memory --case-timeout 120 --no-llm-tunnel` 通过。
 - 相关单元测试通过。
+# 历史文档：上下文门控已废弃
+
+> 本文描述的 `context_followup_gate.py` 已从运行链路删除。当前上下文处理由 `query_understanding.classify_v2()`、`query_router.route_query()` 和会话结构化 trace 共同完成，请勿按本文继续施工。

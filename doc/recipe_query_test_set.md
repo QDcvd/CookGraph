@@ -214,3 +214,6 @@ print(_parse_textual_tool_call('recipe_query_tool(\"小炒黄牛肉怎么做\")'
 - 场景化对话：**第 56-70 条**
 - 边界/负面：**第 71-84 条**
 - 特色数据专项：**第 85-100 条**
+# 历史测试记录
+
+> 本文中的 `query_recipe_kg(query)` 示例已失效。当前测试应通过 `route_query()` 生成 plan，再调用 `query_recipe_plan(plan)`；运行链路见 [USER_MESSAGE_CALL_CHAIN.md](USER_MESSAGE_CALL_CHAIN.md)。

@@ -10,7 +10,7 @@
 2. 是否会被无关内容干扰。
 3. 是否会出现逻辑自相矛盾。
 
-测试必须走真实 agent 链路，不允许 mock agent，不允许只测 `query_recipe_kg()`。
+测试必须走真实 agent 链路，不允许 mock agent，不允许只测底层图谱函数。
 
 必须调用：
 
@@ -41,8 +41,8 @@ test/run_multiturn_dialogue_test.py
 脚本运行后生成两个结果文件：
 
 ```text
-test/multiturn_test_results.json
-test/multiturn_test_report.md
+test/.artifacts/multiturn_test_results.json
+test/.artifacts/multiturn_test_report.md
 ```
 
 不要删除或覆盖现有单轮测试文件。
@@ -341,7 +341,7 @@ case 级还要检查：
 
 ## 报告要求
 
-`multiturn_test_report.md` 必须包含：
+`test/.artifacts/multiturn_test_report.md` 必须包含：
 
 1. 测试时间。
 2. 总 case 数。
@@ -361,7 +361,7 @@ judge_model: deepseek-chat
 
 ## JSON 结果要求
 
-`multiturn_test_results.json` 必须包含完整结构：
+`test/.artifacts/multiturn_test_results.json` 必须包含完整结构：
 
 ```json
 {

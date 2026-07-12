@@ -9,8 +9,8 @@
     python test/run_multiturn_dialogue_test.py --category contradiction
 
 输出：
-    test/multiturn_test_results.json  — 每条用例的详细结果
-    test/multiturn_test_report.md     — 测试报告
+    test/.artifacts/multiturn_test_results.json  — 每条用例的详细结果
+    test/.artifacts/multiturn_test_report.md     — 测试报告
 """
 
 import asyncio
@@ -63,7 +63,8 @@ from backend.agent_adapter_local_LLM_harness import stream_search_agent
 
 
 # ── 配置 ──
-RESULT_DIR = ROOT / "test"
+RESULT_DIR = ROOT / "test" / ".artifacts"
+RESULT_DIR.mkdir(parents=True, exist_ok=True)
 JSON_OUTPUT = RESULT_DIR / "multiturn_test_results.json"
 REPORT_OUTPUT = RESULT_DIR / "multiturn_test_report.md"
 NETWORK_DEPENDENT = True

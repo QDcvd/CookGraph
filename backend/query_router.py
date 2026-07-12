@@ -7,20 +7,24 @@ do not depend on the model freely deciding whether to call tools.
 
 from __future__ import annotations
 
-import re
-from dataclasses import asdict, dataclass
-from typing import Literal
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Literal
 
 from backend.clarification_gate import build_choice_prompt, decide_clarification
-from backend.query_understanding import QueryIntent, classify_intent
-from backend.recipe_query_adapter import kg_dish_names
+from backend.entity_resolver import extract_ingredient_slots_from_source, resolve as resolve_entities
+from backend.query_understanding import (
+    QueryFrame,
+    classify_v2,
+    enforce_query_frame_contract,
+)
+from backend.recipe_query_adapter import kg_dish_names, kg_entity_names
+from backend.tool_result import parse_tool_result
 
 
 RouterActionType = Literal[
     "content",
     "tool",
     "direct_chat",
-    "fallback_tool_loop",
 ]
 
 
@@ -31,11 +35,13 @@ class QueryAction:
     source: str = "query_router"
     tool_name: str | None = None
     query: str | None = None
+    plan: dict | None = None
     answer_user_text: str | None = None
     content: str | None = None
     pending_clarification: dict | None = None
     choice_prompt: dict | None = None
-    intent: QueryIntent | None = None
+    intent: dict | None = None
+    query_frame: QueryFrame | None = None
     confidence: float = 0.0
 
     def to_trace(self) -> dict:
@@ -43,7 +49,161 @@ class QueryAction:
         intent = payload.pop("intent", None)
         if isinstance(intent, dict):
             payload["intent"] = intent
+        qf = payload.pop("query_frame", None)
+        if isinstance(qf, dict):
+            payload["query_frame"] = qf
         return {key: value for key, value in payload.items() if value is not None}
+
+
+def _build_plan(frame: QueryFrame) -> dict:
+    """将已解析的 QueryFrame 转换为 V2 执行 plan。"""
+    mode = "dish"
+    if frame.intent in ("ingredient_combo_query", "scenario_recommendation_query"):
+        mode = "combo"
+    elif frame.intent == "reverse_entity_query":
+        mode = "combo"
+    elif frame.intent == "missing_ingredients_query":
+        mode = "missing"
+    if frame.dish is not None and frame.attribute in {"seasonings", "ingredients", "prep"}:
+        mode = "dish"
+
+    dish_name = (frame.dish.canonical or frame.dish.raw) if frame.dish else (frame.dish_text or None)
+
+    # cannibal resolution
+    def _to_canonical(slots: list) -> list[str]:
+        return [s.canonical or s.raw for s in slots if s.raw]
+
+    plan: dict[str, Any] = {
+        "intent": frame.intent,
+        "mode": mode,
+        "source_text": frame.source_text,
+        "dish": dish_name,
+        "field": frame.attribute,
+        "ingredients": _to_canonical(frame.ingredients),
+        "technique": None,
+        "taste": None,
+        "cuisine": None,
+        "exclude": frame.exclusions or [],
+        "scenario_tags": frame.scenario_tags or [],
+        "seasonings": [],
+        "limit": 20,
+        "confidence": frame.confidence,
+        "resolution": {
+            "ingredients": [
+                {"raw": s.raw, "canonical": s.canonical, "match_mode": s.match_mode, "confidence": s.confidence}
+                for s in frame.ingredients
+            ],
+        },
+    }
+
+    if frame.techniques:
+        plan["technique"] = frame.techniques[0].canonical or frame.techniques[0].raw
+    if frame.tastes:
+        plan["taste"] = frame.tastes[0].canonical or frame.tastes[0].raw
+    if frame.cuisines:
+        plan["cuisine"] = frame.cuisines[0].canonical or frame.cuisines[0].raw
+
+    if frame.attribute == "full_recipe":
+        plan["show_all"] = True
+    if frame.attribute == "seasonings":
+        plan["show_seasonings"] = True
+
+    if frame.dish_candidates:
+        plan["dish_candidates"] = [d.canonical or d.raw for d in frame.dish_candidates]
+
+    return plan
+
+
+def _action_from_frame(frame: QueryFrame) -> QueryAction:
+    """Build the single recipe-tool action from a resolved QueryFrame."""
+    if frame.intent == "greeting":
+        return QueryAction(
+            action="direct_chat",
+            content=_friendly_greeting(),
+            reason=frame.reason or "打招呼",
+            query_frame=frame,
+            confidence=frame.confidence,
+        )
+    if frame.intent == "non_recipe_query":
+        return QueryAction(
+            action="direct_chat",
+            content=_friendly_non_recipe_reply(),
+            reason=frame.reason or "非菜谱问题",
+            query_frame=frame,
+            confidence=frame.confidence,
+        )
+    if frame.intent == "ambiguous_query":
+        return QueryAction(
+            action="content",
+            content=frame.clarification_question or "我有点不确定你想查哪一种含义，可以再具体说一下吗？",
+            reason=frame.reason or "意图不明确",
+            query_frame=frame,
+            confidence=frame.confidence,
+        )
+    if frame.needs_clarification:
+        return QueryAction(
+            action="content",
+            content=frame.clarification_question or "你是在追问上一道菜吗？请告诉我菜名。",
+            reason=frame.reason or "追问缺少上下文",
+            query_frame=frame,
+            confidence=frame.confidence,
+        )
+
+    ambiguous_ingredients = [
+        slot.raw for slot in frame.ingredients if slot.match_mode == "ambiguous" and slot.raw.strip()
+    ]
+    if ambiguous_ingredients and frame.dish is None and frame.intent in {
+        "ingredient_combo_query",
+        "scenario_recommendation_query",
+        "reverse_entity_query",
+    }:
+        names = "、".join(ambiguous_ingredients)
+        return QueryAction(
+            action="content",
+            content=f"你说的“{names}”范围比较大。请说明是猪肉、牛肉、鸡肉，还是其他肉类？",
+            pending_clarification={
+                "type": "ambiguous_ingredient",
+                "payload": {
+                    "original_query": frame.source_text,
+                    "ambiguous": ambiguous_ingredients,
+                    "known_ingredients": [
+                        slot.canonical or slot.raw
+                        for slot in frame.ingredients
+                        if slot.match_mode != "ambiguous" and slot.raw.strip()
+                    ],
+                    "candidate_terms": ["猪肉", "牛肉", "鸡肉", "羊肉", "鸭肉"],
+                },
+                "question": f"你说的“{names}”范围比较大。请说明具体是哪类食材。",
+                "reason": "食材泛称存在多个图谱实体，不能擅自选择具体实体",
+            },
+            reason="食材泛称存在多个图谱实体，不能擅自选择具体实体",
+            query_frame=frame,
+            confidence=frame.confidence,
+        )
+
+    plan = _build_plan(frame)
+    return QueryAction(
+        action="tool",
+        tool_name="recipe_query_tool",
+        # 保留 query 字段作为 trace/旧调用方的显示字段；真正执行参数是 plan。
+        query=frame.resolved_query or frame.source_text,
+        plan=plan,
+        answer_user_text=frame.resolved_query or frame.source_text,
+        reason=frame.reason or frame.intent,
+        query_frame=frame,
+        confidence=frame.confidence,
+    )
+
+
+def _classify_resolve_action(text: str, recipe_context: dict) -> QueryAction:
+    frame = classify_v2(text, recipe_context=recipe_context)
+    extracted = extract_ingredient_slots_from_source(text, entity_names=kg_entity_names())
+    if extracted:
+        existing = {slot.raw for slot in frame.ingredients}
+        frame = replace(frame, ingredients=[*frame.ingredients, *(slot for slot in extracted if slot.raw not in existing)])
+    frame = enforce_query_frame_contract(frame)
+    frame = resolve_entities(frame, entity_names=kg_entity_names())
+    return _action_from_frame(frame)
 
 
 def route_query(user_text: str, history: list[dict] | None = None) -> QueryAction:
@@ -53,38 +213,26 @@ def route_query(user_text: str, history: list[dict] | None = None) -> QueryActio
     if not text:
         return QueryAction(action="direct_chat", content="", reason="空输入")
 
-    try:
-        dish_names = kg_dish_names()
-    except Exception:
-        dish_names = set()
-
-    if _looks_like_graph_dish_count_query(text):
-        return QueryAction(
-            action="tool",
-            tool_name="recipe_query_tool",
-            query=text,
-            reason="本地图谱菜品数量统计",
-            confidence=1.0,
-        )
-
     recipe_context = _recipe_context_from_history(history)
-    clarification = decide_clarification(text, dish_names=dish_names, history=history)
-    contextual_attr_query = _contextual_attribute_query(
-        text,
-        recipe_context,
-        dish_names=dish_names,
-    )
-    if contextual_attr_query:
-        return QueryAction(
-            action="tool",
-            tool_name="recipe_query_tool",
-            query=contextual_attr_query,
-            answer_user_text=contextual_attr_query,
-            reason="前置路由根据当前会话菜品补全属性追问",
-            confidence=0.95,
+    pending_state = any(
+        isinstance(item, dict)
+        and isinstance(item.get("rag_trace"), dict)
+        and (
+            isinstance(item["rag_trace"].get("pending_clarification"), dict)
+            or isinstance(item["rag_trace"].get("choice_prompt"), dict)
+            or isinstance(item["rag_trace"].get("pending_recipe_web_search"), dict)
         )
+        for item in history
+    )
+    clarification = None
+    if pending_state:
+        try:
+            dish_names = kg_dish_names()
+        except Exception:
+            dish_names = set()
+        clarification = decide_clarification(text, dish_names=dish_names, history=history)
 
-    if clarification.action == "ask":
+    if clarification is not None and clarification.action == "ask":
         if (
             clarification.pending_type == "missing_recipe_target"
             and recipe_context.get("current_dish")
@@ -107,80 +255,18 @@ def route_query(user_text: str, history: list[dict] | None = None) -> QueryActio
             )
 
     if clarification is not None and clarification.action == "execute":
+        if (clarification.tool_name or "recipe_query_tool") == "recipe_query_tool":
+            return _classify_resolve_action(clarification.query or text, recipe_context)
         return QueryAction(
             action="tool",
-            tool_name=clarification.tool_name or "recipe_query_tool",
+            tool_name=clarification.tool_name or "web_search_tool",
             query=clarification.query or text,
             reason=clarification.reason,
             confidence=1.0,
         )
 
-    intent = classify_intent(text, dish_names=dish_names, recipe_context=recipe_context)
-
-    if intent.intent == "greeting":
-        return QueryAction(
-            action="direct_chat",
-            content=_friendly_greeting(),
-            reason=intent.reason or "打招呼",
-            intent=intent,
-            confidence=intent.confidence,
-        )
-
-    if intent.intent == "non_recipe_query":
-        return QueryAction(
-            action="direct_chat",
-            content=_friendly_non_recipe_reply(),
-            reason=intent.reason or "非菜谱问题",
-            intent=intent,
-            confidence=intent.confidence,
-        )
-
-    if intent.intent == "ambiguous_query":
-        content = "我有点不确定你想查哪一种含义，可以再具体说一下吗？"
-        return QueryAction(
-            action="content",
-            content=content,
-            reason=intent.reason or "意图不明确",
-            intent=intent,
-            confidence=intent.confidence,
-        )
-
-    if intent.intent == "recipe_followup_query":
-        if intent.resolved_query:
-            return QueryAction(
-                action="tool",
-                tool_name="recipe_query_tool",
-                query=intent.resolved_query,
-                answer_user_text=intent.resolved_query,
-                reason=intent.reason or "上下文追问已补全",
-                intent=intent,
-                confidence=intent.confidence,
-            )
-        return QueryAction(
-            action="content",
-            content="可以的，你先告诉我是哪道菜，我再帮你查。",
-            reason=intent.reason or "上下文追问缺少可继承菜名",
-            intent=intent,
-            confidence=intent.confidence,
-        )
-
-    if intent.intent in {"forward_recipe_query", "forward_unknown_recipe_query", "reverse_query"}:
-        query = intent.resolved_query or text
-        return QueryAction(
-            action="tool",
-            tool_name="recipe_query_tool",
-            query=query,
-            reason=intent.reason or intent.intent,
-            intent=intent,
-            confidence=intent.confidence,
-        )
-
-    return QueryAction(
-        action="fallback_tool_loop",
-        reason=f"router 未覆盖意图: {intent.intent}",
-        intent=intent,
-        confidence=intent.confidence,
-    )
+    # ── V2 流水线 ──
+    return _classify_resolve_action(text, recipe_context)
 
 
 def _recipe_context_from_history(history: list[dict]) -> dict:
@@ -198,11 +284,16 @@ def _recipe_context_from_history(history: list[dict]) -> dict:
                     continue
                 tool_name = str(call.get("tool_name") or call.get("name") or "")
                 args = call.get("args") if isinstance(call.get("args"), dict) else {}
+                plan = args.get("plan") if isinstance(args.get("plan"), dict) else {}
                 query = str(args.get("query") or "")
                 output = str(call.get("output_preview") or "")
                 dish = ""
                 if tool_name == "recipe_query_tool":
-                    dish = _extract_dish_from_tool_output(output)
+                    dish = str(plan.get("dish") or "").strip()
+                    result = call.get("result") if isinstance(call.get("result"), dict) else parse_tool_result(output)
+                    if not dish and result is not None:
+                        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+                        dish = str(data.get("dish") or data.get("dish_name") or "").strip()
                 dish = dish or _extract_dish_from_query(query)
                 if dish:
                     context["current_dish"] = dish
@@ -217,66 +308,6 @@ def _extract_dish_from_query(query: str) -> str:
             candidate = text.split(marker, 1)[0].strip("，,。 的")
             if 2 <= len(candidate) <= 12:
                 return candidate
-    return ""
-
-
-def _contextual_attribute_query(
-    text: str,
-    recipe_context: dict,
-    *,
-    dish_names: set[str] | None = None,
-) -> str:
-    dish = str(recipe_context.get("current_dish") or "").strip()
-    if not dish:
-        return ""
-    normalized = str(text or "").strip()
-    compact = "".join(normalized.split())
-    explicit_dish = _known_dish_in_text(compact, dish_names or set())
-    if explicit_dish and explicit_dish != dish:
-        return ""
-    if any(marker in compact for marker in ("火力", "火候", "调火", "温度")):
-        if dish not in compact:
-            return f"{dish}的火力要怎么样"
-    if any(marker in compact for marker in ("调料", "配料", "用料", "材料")):
-        if dish not in compact:
-            return f"{dish}需要哪些调料和配料"
-    if any(marker in compact for marker in ("注意事项", "注意点", "难点", "要点")):
-        if dish not in compact:
-            return f"{dish}的注意事项"
-    return ""
-
-
-def _known_dish_in_text(text: str, dish_names: set[str]) -> str:
-    compact = "".join(str(text or "").split())
-    matches = [name for name in dish_names if name and name in compact]
-    if not matches:
-        return ""
-    return max(matches, key=len)
-
-
-def _looks_like_graph_dish_count_query(text: str) -> bool:
-    compact = "".join(str(text or "").split())
-    return (
-        "收录" in compact
-        and "多少" in compact
-        and any(marker in compact for marker in ("菜", "菜谱", "菜品"))
-    )
-
-
-def _extract_dish_from_tool_output(output: str) -> str:
-    text = str(output or "")
-    markers = ["【查询结果】 菜品：", "菜品："]
-    for marker in markers:
-        if marker not in text:
-            continue
-        tail = text.split(marker, 1)[1]
-        tail = tail.splitlines()[0].strip()
-        tail = tail.split()[0].strip("：:，,。")
-        if 2 <= len(tail) <= 12:
-            return tail
-    archive = re.match(r"^【(.{2,12}) 完整档案】", text)
-    if archive:
-        return archive.group(1).strip()
     return ""
 
 

@@ -34,6 +34,7 @@ test/multiturn_test_results.json
 test/multiturn_test_report.md
 test/__pycache__/
 test/testdata/
+test/.artifacts/
 
 # ── Claude Code 配置 / 技能（可重新安装） ──
 .claude/

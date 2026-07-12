@@ -15,7 +15,7 @@ class FakeTool:
 
 
 class ToolInputContractTest(unittest.IsolatedAsyncioTestCase):
-    async def test_repairs_json_fragment_query_with_current_user_text(self):
+    async def test_recipe_tool_rejects_legacy_natural_language_query(self):
         calls: list[dict] = []
         with patch("backend.tool_calling._get_tools", return_value=[FakeTool("recipe_query_tool", calls)]):
             tool_name, args, content = await _execute_tool_call(
@@ -25,8 +25,23 @@ class ToolInputContractTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(tool_name, "recipe_query_tool")
-        self.assertEqual(args["query"], "我想吃可乐鸡翅，要怎么做")
-        self.assertEqual(calls, [{"query": "我想吃可乐鸡翅，要怎么做"}])
+        self.assertEqual(args["query"], "{")
+        self.assertEqual(calls, [])
+        self.assertIn("只接受结构化 plan", content)
+
+    async def test_recipe_tool_accepts_structured_plan(self):
+        calls: list[dict] = []
+        plan = {"intent": "dish_detail_query", "mode": "dish", "dish": "可乐鸡翅"}
+        with patch("backend.tool_calling._get_tools", return_value=[FakeTool("recipe_query_tool", calls)]):
+            tool_name, args, content = await _execute_tool_call(
+                {"name": "recipe_query_tool", "args": {"plan": plan}},
+                current_user_text="我想吃可乐鸡翅，要怎么做",
+                history=[],
+            )
+
+        self.assertEqual(tool_name, "recipe_query_tool")
+        self.assertEqual(args, {"plan": plan})
+        self.assertEqual(calls, [{"plan": plan}])
         self.assertIn("called:recipe_query_tool", content)
 
     async def test_affirmative_web_search_uses_pending_original_query(self):
