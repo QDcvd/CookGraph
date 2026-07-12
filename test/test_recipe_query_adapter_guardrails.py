@@ -66,6 +66,23 @@ class RecipeQueryToolResultTests(unittest.TestCase):
         assert "cook_id" not in message
         assert "结构化摘要" not in message
 
+    def test_ingredient_query_is_not_rendered_as_full_archive(self):
+        result = query_recipe_plan({
+            "intent": "dish_detail_query",
+            "mode": "dish",
+            "dish": "小炒黄牛肉",
+            "field": "ingredients",
+            "show_ingredients": True,
+            "source_text": "小炒黄牛肉的食材是什么",
+        })
+        message = result["message"]
+        assert result["ok"] is True
+        assert message.startswith("根据本地菜谱图谱，小炒黄牛肉需要准备这些食材：")
+        assert "主要食材：" in message
+        assert "配料：" in message
+        assert "调味品：" in message
+        assert "cook_id" not in message
+
     def test_unknown_single_dish_allows_web_fallback(self):
         result = query_recipe_plan({
             "intent": "dish_detail_query",

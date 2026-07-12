@@ -112,6 +112,18 @@ class TestQueryFrameContract(unittest.TestCase):
         self.assertEqual(frame.intent, "")
         self.assertFalse(hasattr(frame, "fallback_query"))
 
+    def test_dish_plus_ingredient_attribute_is_detail_query(self):
+        frame = enforce_query_frame_contract(QueryFrame(
+            intent="ambiguous_query",
+            source_text="小炒黄牛肉要备哪些食材",
+            dish_text="小炒黄牛肉",
+            attribute="ingredients",
+            needs_clarification=True,
+            confidence=0.98,
+        ))
+        self.assertEqual(frame.intent, "dish_detail_query")
+        self.assertFalse(frame.needs_clarification)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

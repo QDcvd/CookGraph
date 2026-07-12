@@ -199,6 +199,18 @@ def enforce_query_frame_contract(frame: QueryFrame) -> QueryFrame:
     if resolved_dish and not frame.dish_text:
         frame = replace(frame, dish_text=resolved_dish)
 
+    # 明确菜名 + 属性字段是正向菜品详情查询。
+    # 这条合同利用结构化槽位纠正模型把“某道菜需要哪些食材”误判成
+    # ingredient_combo/ambiguous 的情况，不依赖用户措辞或关键词表。
+    if frame.dish_text and frame.attribute in {"ingredients", "seasonings", "prep", "fire", "tips", "method", "cooking_process"}:
+        if frame.intent in {"ambiguous_query", "ingredient_combo_query"}:
+            return replace(
+                frame,
+                intent="dish_detail_query",
+                needs_clarification=False,
+                clarification_question=None,
+            )
+
     if frame.intent in {"ingredient_combo_query", "scenario_recommendation_query", "reverse_entity_query"}:
         if has_explicit_target or frame.scenario_tags:
             return replace(frame, needs_clarification=False, clarification_question=None)
@@ -236,8 +248,9 @@ attribute 只能描述用户要查的字段，例如 full_recipe、method、prep
 3. 按天气、口味、菜系、技法或场景推荐，使用 scenario_recommendation_query。
 4. 询问哪些菜使用某食材、口味、菜系或技法，使用 reverse_entity_query。
 5. 只有省略菜名并且依赖当前上下文时，才使用 recipe_followup_query，并设置 requires_context=true。
-6. 字段必须严格区分：准备食材、切配、腌制等“备菜”问题用 prep；下锅后的步骤、翻炒、蒸煮等“烹饪过程”用 cooking_process；用户泛问整道菜的做法用 full_recipe 或 method。即使问题使用“它的……”省略菜名，也必须根据本轮字段词选择对应 attribute，不要把 prep 改成 cooking_process。
-7. 无法可靠判断时使用 ambiguous_query，不要猜测实体。
+6. 如果明确提到某道菜，并询问“需要哪些食材、用料是什么、准备什么”，使用 dish_detail_query，attribute=ingredients；如果询问调料，使用 dish_detail_query，attribute=seasonings。只有用户先提供“我有/家里有/冰箱里有”的现有食材，并反问能做什么菜时，才使用 ingredient_combo_query。
+7. 字段必须严格区分：准备食材、切配、腌制等“备菜”问题用 prep；下锅后的步骤、翻炒、蒸煮等“烹饪过程”用 cooking_process；用户泛问整道菜的做法用 full_recipe 或 method。即使问题使用“它的……”省略菜名，也必须根据本轮字段词选择对应 attribute，不要把 prep 改成 cooking_process。
+8. 无法可靠判断时使用 ambiguous_query，不要猜测实体。
 
 字段示例：
 - “它的备菜过程呢” -> intent=dish_detail_query, attribute=prep

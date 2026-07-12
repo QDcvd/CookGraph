@@ -133,6 +133,34 @@ def _relation_items(relations: dict, relation_type: str, *keys: str) -> list[dic
     return items
 
 
+def _ingredient_categories(relations: dict) -> tuple[list[dict], list[dict], list[dict]]:
+    """Return main ingredients, auxiliary ingredients, and seasonings."""
+    main = _relation_items(relations, "USES_MAIN_INGREDIENT", "主要食材")
+    auxiliary = _relation_items(relations, "USES_AUXILIARY_INGREDIENT", "配料", "USES_AUXILIARY_INGREDIENT")
+    seasonings = _relation_items(relations, "USES_SEASONING", "调味品", "调味料")
+    if not main or not auxiliary or not seasonings:
+        food_list = relations.get("食材清单", []) or []
+        if not main:
+            main = [item for item in food_list if item.get("type") == "USES_MAIN_INGREDIENT"]
+        if not auxiliary:
+            auxiliary = [item for item in food_list if item.get("type") == "USES_AUXILIARY_INGREDIENT"]
+        if not seasonings:
+            seasonings = [item for item in food_list if item.get("type") == "USES_SEASONING"]
+    return main, auxiliary, seasonings
+
+
+def _format_ingredient_sections(relations: dict, *, include_seasonings: bool = True) -> list[str]:
+    main, auxiliary, seasonings = _ingredient_categories(relations)
+    lines: list[str] = []
+    if main:
+        lines.append("主要食材：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in main))
+    if auxiliary:
+        lines.append("配料：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in auxiliary))
+    if include_seasonings and seasonings:
+        lines.append("调味品：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in seasonings))
+    return lines
+
+
 def _format_steps(text: Any) -> list[str]:
     """Split numbered recipe text into readable lines without inventing steps."""
     raw = str(text or "").strip().replace("；", ";")
@@ -149,25 +177,8 @@ def _format_full_recipe_result(result: dict) -> str:
     attributes = result.get("attributes") if isinstance(result.get("attributes"), dict) else {}
     relations = result.get("relations") if isinstance(result.get("relations"), dict) else {}
 
-    main = _relation_items(relations, "USES_MAIN_INGREDIENT", "主要食材")
-    auxiliary = _relation_items(relations, "USES_AUXILIARY_INGREDIENT", "配料", "USES_AUXILIARY_INGREDIENT")
-    seasonings = _relation_items(relations, "USES_SEASONING", "调味品", "调味料")
-    if not main or not auxiliary or not seasonings:
-        food_list = relations.get("食材清单", []) or []
-        if not main:
-            main = [item for item in food_list if item.get("type") == "USES_MAIN_INGREDIENT"]
-        if not auxiliary:
-            auxiliary = [item for item in food_list if item.get("type") == "USES_AUXILIARY_INGREDIENT"]
-        if not seasonings:
-            seasonings = [item for item in food_list if item.get("type") == "USES_SEASONING"]
-
     lines = [f"根据本地菜谱图谱，{dish}可以这样做：", "", "用料：", ""]
-    if main:
-        lines.append("主要食材：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in main))
-    if auxiliary:
-        lines.append("配料：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in auxiliary))
-    if seasonings:
-        lines.append("调味品：" + "、".join(_format_amount(item.get("name"), item.get("amount")) for item in seasonings))
+    lines.extend(_format_ingredient_sections(relations))
 
     method_steps = _format_steps(attributes.get("cooking_method_desc"))
     prep_steps = _format_steps(attributes.get("prep_process"))
@@ -182,6 +193,20 @@ def _format_full_recipe_result(result: dict) -> str:
         lines.extend(["", "火力和时间：", "", *fire_steps])
 
     lines.extend(["", "以上内容来自本地菜谱知识图谱。"])
+    return "\n".join(lines)
+
+
+def _format_ingredients_result(result: dict, *, seasonings_only: bool = False) -> str:
+    dish = str(result.get("dish_name") or "这道菜").strip()
+    relations = result.get("relations") if isinstance(result.get("relations"), dict) else {}
+    lines = [f"根据本地菜谱图谱，{dish}需要准备这些食材：", ""]
+    if seasonings_only:
+        sections = _format_ingredient_sections(relations, include_seasonings=True)
+        sections = [line for line in sections if line.startswith("调味品：")]
+    else:
+        sections = _format_ingredient_sections(relations)
+    lines.extend(sections or ["暂时没有记录完整的用料信息。"])
+    lines.extend(["", "如果你想继续，我也可以接着告诉你这道菜的备菜和做法。"])
     return "\n".join(lines)
 
 
@@ -451,6 +476,8 @@ def query_recipe_plan(plan: dict, kg_path: str | None = None) -> dict:
     message = str(result.get("human_readable") or "").strip()
     if success and mode == "dish" and bool(plan.get("show_all")):
         message = _format_full_recipe_result(result)
+    elif success and mode == "dish" and plan.get("field") in {"ingredients", "seasonings"}:
+        message = _format_ingredients_result(result, seasonings_only=plan.get("field") == "seasonings")
     if not message:
         message = "本地菜谱查询完成。" if success else "本地图谱没有找到符合条件的结果。"
     query_type = _query_type(mode, intent)

@@ -105,6 +105,8 @@ def _build_plan(frame: QueryFrame) -> dict:
 
     if frame.attribute == "full_recipe":
         plan["show_all"] = True
+    if frame.attribute == "ingredients":
+        plan["show_ingredients"] = True
     if frame.attribute == "seasonings":
         plan["show_seasonings"] = True
 

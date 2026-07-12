@@ -41,6 +41,18 @@ class QueryRouterV2Test(unittest.TestCase):
         self.assertEqual(action.plan["field"], "cooking_process")
         self.assertNotIn("query", action.plan)
 
+    def test_ingredient_attribute_sets_ingredient_projection(self):
+        action = self._route(QueryFrame(
+            intent="dish_detail_query",
+            source_text="小炒黄牛肉的食材是什么",
+            dish=EntitySlot(raw="小炒黄牛肉", canonical="小炒黄牛肉", entity_type="Dish", match_mode="exact", confidence=1.0),
+            attribute="ingredients",
+            confidence=0.98,
+        ))
+        self.assertEqual(action.action, "tool")
+        self.assertEqual(action.plan["field"], "ingredients")
+        self.assertTrue(action.plan["show_ingredients"])
+
     def test_combo_frame_becomes_recipe_plan(self):
         action = self._route(QueryFrame(
             intent="ingredient_combo_query",
